@@ -103,4 +103,49 @@ if run:
 
     col3.success(recommendation)
 
+    st.divider()
+    st.subheader("Production Assessment")
+
+    strengths = []
+    weaknesses = []
+
+    if energy > 0.65:
+        strengths.append("Energy aligns with high-performing tracks.")
+    else:
+        weaknesses.append("Energy below common hit threshold (0.65).")
+
+    if danceability > 0.60:
+        strengths.append("Danceability within competitive streaming range.")
+    else:
+        weaknesses.append("Danceability below common engagement range (0.60).")
+
+    if loudness > -8:
+        strengths.append("Loudness consistent with commercial production standards.")
+    else:
+        weaknesses.append("Loudness below competitive streaming levels (-8 dB threshold).")
+
+    if followers > 50000:
+        strengths.append("Strong baseline artist reach.")
+    else:
+        weaknesses.append("Limited artist reach may constrain exposure.")
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.markdown("**Strengths**")
+        if strengths:
+            for s in strengths:
+                st.write("-", s)
+        else:
+            st.write("No structural strengths identified.")
+
+    with colB:
+        st.markdown("**Areas for Improvement**")
+        if weaknesses:
+            for w in weaknesses:
+                st.write("-", w)
+        else:
+            st.write("No material weaknesses identified.")
+
+
 
