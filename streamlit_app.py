@@ -9,6 +9,24 @@ st.set_page_config(
 st.title("Beat Forecast")
 st.caption("Data-driven decision support for estimating Spotify performance prior to release.")
 
+st.divider()
+
+# ---------------- Market Context ----------------
+col_mc1, col_mc2 = st.columns([2, 1])
+
+with col_mc1:
+    st.subheader("Market Context")
+    st.write(
+        "Spotify breakout success is structurally rare. "
+        "Only a small fraction of tracks achieve top-tier performance. "
+        "This tool evaluates whether a song aligns with structural success patterns."
+    )
+
+with col_mc2:
+    st.metric("Observed Hit Rate (2024)", "0.22%")
+
+st.divider()
+
 # ---------------- Sidebar ----------------
 st.sidebar.header("Model Inputs")
 
@@ -63,13 +81,11 @@ st.dataframe(inputs, use_container_width=True, hide_index=True)
 
 st.divider()
 
-st.subheader("Model Drivers")
-st.write("Feature importance and directional guidance will appear here once models are connected.")
+st.subheader("Performance Drivers")
+st.write("Directional guidance will appear here. Model-based feature importance will be added during final integration.")
 
 if run:
-
     # --- Simple Rule-Based Scoring (Temporary Logic) ---
-
     score = 0
 
     # Production thresholds (aligned with report findings)
@@ -90,7 +106,7 @@ if run:
     predicted_popularity = 20 + (score * 8)
 
     # --- Update Metrics ---
-    col1.metric("Hit Likelihood", f"{round(breakout_prob*100, 1)}%")
+    col1.metric("Hit Likelihood", f"{round(breakout_prob * 100, 1)}%")
     col2.metric("Predicted Popularity (0–100)", round(predicted_popularity, 1))
 
     # --- Recommendation Logic ---
@@ -146,6 +162,11 @@ if run:
                 st.write("-", w)
         else:
             st.write("No material weaknesses identified.")
+
+    st.divider()
+    st.subheader("Signal Strength")
+    st.write("Breakout probability visualization based on structural alignment.")
+    st.progress(breakout_prob)
 
 
 
