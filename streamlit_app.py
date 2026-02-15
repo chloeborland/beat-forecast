@@ -78,6 +78,26 @@ inputs = pd.DataFrame([{
 }])
 
 st.dataframe(inputs, use_container_width=True, hide_index=True)
+st.divider()
+st.subheader("Scenario Comparison")
+
+if "scenarios" not in st.session_state:
+    st.session_state["scenarios"] = []
+
+colS1, colS2 = st.columns([1, 1])
+
+with colS1:
+    if st.button("Save Current Scenario"):
+        st.session_state["scenarios"].append(inputs.iloc[0].to_dict())
+
+with colS2:
+    if st.button("Clear Scenarios"):
+        st.session_state["scenarios"] = []
+
+if st.session_state["scenarios"]:
+    st.dataframe(pd.DataFrame(st.session_state["scenarios"]), use_container_width=True, hide_index=True)
+else:
+    st.caption("Save multiple input sets to compare tradeoffs across songs or mixes.")
 
 st.divider()
 
