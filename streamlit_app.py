@@ -67,5 +67,40 @@ st.subheader("Model Drivers")
 st.write("Feature importance and directional guidance will appear here once models are connected.")
 
 if run:
-    st.warning("Forecast will run once the trained models are integrated.")
+
+    # --- Simple Rule-Based Scoring (Temporary Logic) ---
+
+    score = 0
+
+    # Production thresholds (aligned with report findings)
+    if energy > 0.65:
+        score += 1
+    if danceability > 0.60:
+        score += 1
+    if loudness > -8:
+        score += 1
+
+    # Artist leverage
+    if followers > 50000:
+        score += 1
+    if artist_pop > 60:
+        score += 1
+
+    breakout_prob = min(score * 0.12, 0.60)  # cap at 60%
+    predicted_popularity = 20 + (score * 8)
+
+    # --- Update Metrics ---
+    col1.metric("Hit Likelihood", f"{round(breakout_prob*100, 1)}%")
+    col2.metric("Predicted Popularity (0–100)", round(predicted_popularity, 1))
+
+    # --- Recommendation Logic ---
+    if breakout_prob > 0.40:
+        recommendation = "Release-ready under current production and exposure profile."
+    elif breakout_prob > 0.25:
+        recommendation = "Moderate breakout potential. Consider production refinements or stronger promotion."
+    else:
+        recommendation = "Low projected breakout probability under current inputs."
+
+    col3.success(recommendation)
+
 
