@@ -1,185 +1,239 @@
-import streamlit as st
-import pandas as pd
+import io
 import joblib
-from pathlib import Path
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-# ---------------- Page Config ----------------
-st.set_page_config(page_title="Beat Forecast", layout="wide")
+# Audio extraction
+try:
+    import librosa
+except Exception:
+    librosa = None
 
-st.title("Beat Forecast")
-st.caption("Data-driven decision support for estimating Spotify performance prior to release.")
-st.divider()
 
-# ---------------- Load Model (cached) ----------------
-MODEL_PATH = Path("models/pop_rf_pipeline.joblib")
+# ============================================================
+# Page config + Green theme CSS
+# ============================================================
+st.set_page_config(
+    page_title="Beat Forecast",
+    page_icon="🟢",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+st.markdown(
+    """
+    <style>
+      :root{
+        --green-900:#0b3d2e;
+        --green-800:#0f5a3f;
+        --green-700:#137a53;
+        --green-100:#e7f5ee;
+        --green-050:#f2fbf6;
+
+        --text:#1f2328;
+        --muted:rgba(31,35,40,0.65);
+        --border:rgba(31,35,40,0.10);
+        --shadow:0 10px 24px rgba(0,0,0,0.06);
+      }
+
+      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1200px; }
+      [data-testid="stSidebar"] { border-right: 1px solid var(--border); }
+
+      h1, h2, h3 { letter-spacing: -0.02em; }
+      .muted { color: var(--muted); }
+
+      /* Primary button */
+      div.stButton > button[kind="primary"]{
+        background: linear-gradient(180deg, var(--green-700), var(--green-800));
+        border: 1px solid rgba(19,122,83,0.35);
+        color: white;
+        border-radius: 14px;
+        padding: 0.7rem 1rem;
+        box-shadow: var(--shadow);
+      }
+      div.stButton > button[kind="primary"]:hover{
+        filter: brightness(1.02);
+      }
+
+      /* Cards */
+      .card{
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 16px;
+        background: rgba(255,255,255,0.85);
+        box-shadow: var(--shadow);
+      }
+      .card-title{ font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+      .card-value{ font-size: 32px; font-weight: 800; line-height: 1.05; color: var(--text); }
+      .card-sub{ font-size: 12px; color: rgba(31,35,40,0.55); margin-top: 6px; }
+
+      /* Chips */
+      .chip{
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: var(--green-100);
+        border: 1px solid rgba(19,122,83,0.18);
+        color: var(--green-900);
+        font-weight: 750;
+        font-size: 12px;
+        margin: 0 8px 8px 0;
+      }
+
+      /* Recommendation */
+      .rec{
+        border-radius: 16px;
+        padding: 16px;
+        border: 1px solid rgba(19,122,83,0.18);
+        box-shadow: var(--shadow);
+      }
+      .rec.good{ background: rgba(19,122,83,0.14); }
+      .rec.mid{ background: rgba(242, 192, 86, 0.18); border-color: rgba(242,192,86,0.35); }
+      .rec.low{ background: rgba(220, 53, 69, 0.10); border-color: rgba(220,53,69,0.20); }
+      .rec-title{ font-size: 14px; font-weight: 850; margin-bottom: 6px; color: var(--text); }
+      .rec-text{ margin: 0; color: rgba(31,35,40,0.78); }
+
+      /* Section divider */
+      .hr{ height: 1px; background: rgba(31,35,40,0.08); margin: 12px 0 14px 0; }
+
+      footer {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# Model loader
+# ============================================================
 @st.cache_resource
 def load_model(model_path: str):
     return joblib.load(model_path)
 
-def safe_get_feature_names(pipeline):
-    # Works if model was trained with a pandas DataFrame and sklearn stored feature_names_in_
-    if hasattr(pipeline, "feature_names_in_"):
-        return list(pipeline.feature_names_in_)
-    # Try to reach inside pipeline steps (sometimes stored there)
-    if hasattr(pipeline, "named_steps"):
-        for step in pipeline.named_steps.values():
-            if hasattr(step, "feature_names_in_"):
-                return list(step.feature_names_in_)
-    return None
+MODEL_PATH = "models/pop_rf_pipeline.joblib"
 
-def safe_get_feature_importance(pipeline):
-    # Assumes pipeline has a "model" step that is a RandomForestRegressor (or similar)
-    if hasattr(pipeline, "named_steps") and "model" in pipeline.named_steps:
-        model = pipeline.named_steps["model"]
-        if hasattr(model, "feature_importances_"):
-            return model.feature_importances_
-    return None
 
-# ---------------- Market Context ----------------
-col_mc1, col_mc2 = st.columns([2, 1])
-with col_mc1:
-    st.subheader("Market Context")
-    st.write(
-        "Spotify breakout success is structurally rare. "
-        "Only a small fraction of tracks achieve top-tier performance. "
-        "This tool evaluates whether a song aligns with structural success patterns "
-        "and predicts expected popularity prior to release."
-    )
-with col_mc2:
-    st.metric("Observed Hit Rate (2024)", "0.22%")
+# ============================================================
+# Helpers + feature extraction
+# ============================================================
+def clip01(x: float) -> float:
+    return float(np.clip(x, 0.0, 1.0))
 
-st.divider()
+def normalize_minmax(x: float, xmin: float, xmax: float) -> float:
+    if xmax <= xmin:
+        return 0.0
+    return clip01((x - xmin) / (xmax - xmin))
 
-# ---------------- Sidebar Inputs ----------------
-st.sidebar.header("Model Inputs")
+def seconds_to_mmss(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    m = int(seconds // 60)
+    s = int(round(seconds % 60))
+    return f"{m}:{s:02d}"
 
-with st.sidebar.expander("Artist Context", expanded=True):
-    followers = st.number_input("Artist Followers", min_value=0, value=5000, step=100, help="Total followers for the artist.")
-    artist_pop = st.slider("Artist Popularity (0–100)", 0, 100, 35, help="Spotify-style popularity score for the artist.")
+def estimate_key_mode(chroma_mean: np.ndarray) -> tuple[int, int]:
+    major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+    minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-with st.sidebar.expander("Audio Features", expanded=True):
-    danceability = st.slider("Danceability", 0.0, 1.0, 0.60)
-    energy = st.slider("Energy", 0.0, 1.0, 0.70)
-    loudness = st.slider("Loudness (dB)", -60.0, 0.0, -7.0)
-    tempo = st.slider("Tempo (BPM)", 40.0, 220.0, 120.0)
-    valence = st.slider("Valence", 0.0, 1.0, 0.50)
-    speechiness = st.slider("Speechiness", 0.0, 1.0, 0.10)
-    acousticness = st.slider("Acousticness", 0.0, 1.0, 0.10)
+    chroma = chroma_mean / (np.sum(chroma_mean) + 1e-9)
 
-with st.sidebar.expander("Defaults (needed by model)", expanded=False):
-    # These are required by your model’s training schema
-    year = st.slider("Release Year", 1950, 2026, 2024, help="If unknown, keep current year.")
-    duration_ms = st.number_input("Duration (ms)", min_value=30_000, value=210_000, step=1_000, help="Typical song ~180k–240k ms.")
-    key = st.selectbox("Key", list(range(12)), index=5, help="0=C, 1=C#, … 11=B (Spotify encoding).")
-    mode = st.selectbox("Mode", [0, 1], index=1, help="0=minor, 1=major.")
-    instrumentalness = st.slider("Instrumentalness", 0.0, 1.0, 0.0)
-    liveness = st.slider("Liveness", 0.0, 1.0, 0.15)
+    best_key, best_mode, best_score = 0, 1, -1e9
+    for k in range(12):
+        maj = np.roll(major_profile, k)
+        minr = np.roll(minor_profile, k)
+        maj_score = np.corrcoef(chroma, maj / maj.sum())[0, 1]
+        min_score = np.corrcoef(chroma, minr / minr.sum())[0, 1]
+        if np.isnan(maj_score): maj_score = -1e9
+        if np.isnan(min_score): min_score = -1e9
+        if maj_score > best_score:
+            best_score = maj_score
+            best_key = k
+            best_mode = 1
+        if min_score > best_score:
+            best_score = min_score
+            best_key = k
+            best_mode = 0
+    return int(best_key), int(best_mode)
 
-with st.sidebar.expander("Genre (one-hot)", expanded=True):
-    primary_genre = st.selectbox(
-        "Primary Genre",
-        ["Classical", "Country", "Electronic", "Folk", "Hip-Hop", "Jazz", "Pop", "R&B", "Rock"],
-        index=6
-    )
+def extract_audio_features(file_bytes: bytes) -> dict:
+    if librosa is None:
+        raise RuntimeError("librosa is not installed. Audio extraction unavailable.")
 
-show_debug = st.sidebar.checkbox("Show debug (feature alignment)", value=False)
+    y, sr = librosa.load(io.BytesIO(file_bytes), sr=None, mono=True)
 
-st.sidebar.divider()
-run = st.sidebar.button("Run Forecast", type="primary")
+    duration_sec = float(librosa.get_duration(y=y, sr=sr))
+    duration_ms = int(round(duration_sec * 1000))
 
-# ---------------- Build Input DataFrame (app-level) ----------------
-# These are your app inputs (nice for display)
-inputs_display = pd.DataFrame([{
-    "followers": followers,
-    "artist_popularity": artist_pop,
-    "danceability": danceability,
-    "energy": energy,
-    "loudness": loudness,
-    "tempo": tempo,
-    "valence": valence,
-    "speechiness": speechiness,
-    "acousticness": acousticness,
-    "year": year,
-    "duration_ms": duration_ms,
-    "key": key,
-    "mode": mode,
-    "instrumentalness": instrumentalness,
-    "liveness": liveness,
-    "primary_genre": primary_genre
-}])
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = float(tempo) if np.isfinite(tempo) else 120.0
+    tempo = float(np.clip(tempo, 40.0, 220.0))
 
-# ---------------- Main Layout (top KPIs) ----------------
-col1, col2, col3 = st.columns(3)
+    rms = librosa.feature.rms(y=y)[0]
+    rms_mean = float(np.mean(rms))
+    loudness_db = float(20.0 * np.log10(rms_mean + 1e-9))
+    loudness_db = float(np.clip(loudness_db, -60.0, 0.0))
 
-with col1:
-    st.subheader("Breakout Probability")
-    hit_likelihood_placeholder = st.empty()
+    energy = normalize_minmax(rms_mean, 0.01, 0.20)
 
-with col2:
-    st.subheader("Popularity Forecast")
-    pop_forecast_placeholder = st.empty()
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    onset_mean = float(np.mean(onset_env)) if len(onset_env) else 0.0
+    onset_std = float(np.std(onset_env)) if len(onset_env) else 0.0
+    rhythm_strength = normalize_minmax(onset_mean, 0.10, 2.50)
+    rhythm_stability = 1.0 - normalize_minmax(onset_std, 0.20, 2.00)
+    danceability = clip01(rhythm_strength * rhythm_stability)
 
-with col3:
-    st.subheader("Executive Recommendation")
-    rec_placeholder = st.empty()
+    zcr = librosa.feature.zero_crossing_rate(y=y)[0]
+    zcr_mean = float(np.mean(zcr))
+    speechiness = normalize_minmax(zcr_mean, 0.02, 0.20)
 
-st.divider()
+    flatness = librosa.feature.spectral_flatness(y=y)[0]
+    acousticness = normalize_minmax(float(np.mean(flatness)), 0.01, 0.25)
 
-# ---------------- Input Summary ----------------
-st.subheader("Input Summary")
-st.dataframe(
-    inputs_display.drop(columns=["primary_genre"]),
-    use_container_width=True,
-    hide_index=True
-)
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    centroid_mean = float(np.mean(centroid))
+    valence = normalize_minmax(centroid_mean, 800.0, 3500.0)
 
-st.divider()
+    y_harm, y_perc = librosa.effects.hpss(y)
+    harm_rms = float(np.mean(librosa.feature.rms(y=y_harm)[0]))
+    perc_rms = float(np.mean(librosa.feature.rms(y=y_perc)[0]))
+    harm_ratio = harm_rms / (harm_rms + perc_rms + 1e-9)
+    instrumentalness = normalize_minmax(harm_ratio, 0.40, 0.90)
 
-# ---------------- Scenario Comparison ----------------
-st.subheader("Scenario Comparison")
+    liveness = normalize_minmax(float(np.std(rms)), 0.005, 0.08)
 
-if "scenarios" not in st.session_state:
-    st.session_state["scenarios"] = []
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+    chroma_mean = np.mean(chroma, axis=1)
+    key, mode = estimate_key_mode(chroma_mean)
 
-colS1, colS2 = st.columns([1, 1])
+    return {
+        "sr": int(sr),
+        "duration_sec": duration_sec,
+        "duration_ms": duration_ms,
+        "tempo": tempo,
+        "loudness": loudness_db,
+        "energy": float(energy),
+        "danceability": float(danceability),
+        "valence": float(valence),
+        "speechiness": float(speechiness),
+        "acousticness": float(acousticness),
+        "instrumentalness": float(instrumentalness),
+        "liveness": float(liveness),
+        "key": int(np.clip(key, 0, 11)),
+        "mode": int(mode),
 
-with colS1:
-    if st.button("Save Current Scenario"):
-        st.session_state["scenarios"].append(inputs_display.iloc[0].to_dict())
+        # diagnostics
+        "rms_mean": rms_mean,
+        "onset_mean": onset_mean,
+        "onset_std": onset_std,
+        "centroid_mean": centroid_mean,
+        "flatness_mean": float(np.mean(flatness)),
+        "zcr_mean": zcr_mean,
+    }
 
-with colS2:
-    if st.button("Clear Scenarios"):
-        st.session_state["scenarios"] = []
+def build_model_input(feature_names, values: dict) -> pd.DataFrame:
+    X = pd.DataFrame([{c: 0 for c in feature_names}], columns=feature_names)
 
-if st.session_state["scenarios"]:
-    st.dataframe(pd.DataFrame(st.session_state["scenarios"]), use_container_width=True, hide_index=True)
-else:
-    st.caption("Save multiple input sets to compare tradeoffs across songs or mixes.")
-
-st.divider()
-
-# ---------------- Performance Drivers ----------------
-st.subheader("Performance Drivers")
-st.write("Model-based feature importance is shown after you run a forecast.")
-
-# ---------------- Helper: Build model-ready X_input ----------------
-def build_model_input(df_row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
-    """
-    Builds a 1-row dataframe that matches the model's expected feature columns.
-    """
-    # Start with all expected columns set to 0/None; fill numerical defaults
-    X = pd.DataFrame([{c: 0 for c in expected_cols}])
-
-    # Map app fields to model fields
-    # Model expects: total_artist_followers, avg_artist_popularity
-    if "total_artist_followers" in expected_cols:
-        X.loc[0, "total_artist_followers"] = float(df_row["followers"])
-    if "avg_artist_popularity" in expected_cols:
-        X.loc[0, "avg_artist_popularity"] = float(df_row["artist_popularity"])
-
-    # Direct audio features
-    direct_map = {
+    mapping = {
         "danceability": "danceability",
         "energy": "energy",
         "loudness": "loudness",
@@ -189,163 +243,458 @@ def build_model_input(df_row: pd.Series, expected_cols: list[str]) -> pd.DataFra
         "acousticness": "acousticness",
         "instrumentalness": "instrumentalness",
         "liveness": "liveness",
-        "duration_ms": "duration_ms",
-        "year": "year",
         "key": "key",
         "mode": "mode",
+        "duration_ms": "duration_ms",
+        "year": "year",
+        "followers": "total_artist_followers",
+        "artist_popularity": "avg_artist_popularity",
     }
 
-    for app_k, model_k in direct_map.items():
-        if model_k in expected_cols:
-            X.loc[0, model_k] = float(df_row[app_k])
+    for src_k, model_k in mapping.items():
+        if model_k in X.columns and values.get(src_k) is not None:
+            X.loc[0, model_k] = float(values[src_k])
 
-    # Genre one-hot
-    # expected: genre_Classical ... genre_Rock
-    genre_col = f"genre_{df_row['primary_genre']}"
-    if genre_col in expected_cols:
-        X.loc[0, genre_col] = 1
+    genre = values.get("genre", "Pop")
+    genre_col = f"genre_{genre}"
+    if genre_col in X.columns:
+        X.loc[0, genre_col] = 1.0
 
-    # Ensure column order exactly matches model expectation
-    X = X[expected_cols]
     return X
 
-# ---------------- Run Forecast ----------------
+def recommendation_from_popularity(pred_pop: float) -> tuple[str, str]:
+    if pred_pop >= 70:
+        return "good", "High projected popularity. Strong release candidate with current profile."
+    if pred_pop >= 50:
+        return "mid", "Moderate projected popularity. Tighten production + boost promotion to improve odds."
+    if pred_pop >= 30:
+        return "mid", "Lower projected popularity. Consider adjusting energy/tempo mix or genre-positioning."
+    return "low", "Very low projected popularity under current inputs. Treat as experimental or revise key drivers."
+
+def hit_likelihood_from_popularity(pred_pop: float) -> float:
+    """
+    FIXED: Sigmoid mapping so it’s never “stuck” at 0%.
+    - Popularity ~50 gives ~50% likelihood
+    - Popularity ~30 gives low but non-zero
+    - Popularity ~80+ approaches high likelihood
+    """
+    # Center and steepness (tune if desired)
+    center = 50.0
+    steep = 10.0
+    p = 1.0 / (1.0 + np.exp(-(pred_pop - center) / steep))
+
+    # Keep it readable (avoid exact 0 or 1)
+    return float(np.clip(p, 0.01, 0.99))
+
+def score_badges(audio_feats: dict) -> list[str]:
+    if audio_feats is None:
+        return []
+    badges = []
+    if 100 <= audio_feats["tempo"] <= 140:
+        badges.append("Tempo in pop range")
+    if audio_feats["loudness"] >= -9:
+        badges.append("Commercial loudness")
+    if audio_feats["danceability"] >= 0.55:
+        badges.append("Rhythm strong")
+    if audio_feats["energy"] >= 0.60:
+        badges.append("High energy")
+    return badges[:4]
+
+
+# ============================================================
+# App state
+# ============================================================
+if "scenario_bank" not in st.session_state:
+    st.session_state["scenario_bank"] = []
+
+
+# ============================================================
+# Header
+# ============================================================
+l, r = st.columns([2.4, 1])
+with l:
+    st.title("Beat Forecast")
+    st.markdown('<span class="muted">Song-driven forecasting using your trained regression pipeline.</span>', unsafe_allow_html=True)
+with r:
+    st.markdown(
+        """
+        <div class="card">
+          <div class="card-title">Theme</div>
+          <div class="card-value" style="font-size:18px; color: var(--green-900);">Green Executive Dashboard</div>
+          <div class="card-sub">Audio → features → model → recommendation</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
+
+# ============================================================
+# Sidebar
+# ============================================================
+st.sidebar.markdown("## Inputs")
+st.sidebar.caption("Upload a song, set artist context, choose genre, then run the forecast.")
+
+uploaded_audio = st.sidebar.file_uploader("Upload MP3/WAV", type=["mp3", "wav"], accept_multiple_files=False)
+
+with st.sidebar.expander("Artist Context", expanded=True):
+    followers = st.number_input("Artist Followers", min_value=0, value=5000, step=100)
+    artist_pop = st.slider("Artist Popularity (0–100)", 0, 100, 35)
+    year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, step=1)
+
+with st.sidebar.expander("Genre", expanded=True):
+    genre = st.selectbox("Primary Genre",
+                         ["Pop", "Rock", "Hip-Hop", "R&B", "Electronic", "Country", "Jazz", "Folk", "Classical"],
+                         index=0)
+
+st.sidebar.markdown("---")
+run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True)
+
+
+# ============================================================
+# Tabs
+# ============================================================
+tab_overview, tab_features, tab_compare, tab_debug = st.tabs(
+    ["Overview", "Song Features", "Compare Scenarios", "Debug"]
+)
+
+# ============================================================
+# Extract features immediately (so UI updates on upload)
+# ============================================================
+audio_feats = None
+audio_bytes = None
+filename = None
+
+if uploaded_audio is not None:
+    filename = uploaded_audio.name
+    if librosa is None:
+        st.sidebar.error("librosa is not installed, so audio extraction can't run.")
+    else:
+        try:
+            audio_bytes = uploaded_audio.read()
+            audio_feats = extract_audio_features(audio_bytes)
+            with st.sidebar.expander("Extracted (from upload)", expanded=False):
+                st.write({
+                    "file": filename,
+                    "duration": seconds_to_mmss(audio_feats["duration_sec"]),
+                    "tempo": round(audio_feats["tempo"], 1),
+                    "loudness_db": round(audio_feats["loudness"], 2),
+                    "energy": round(audio_feats["energy"], 3),
+                    "danceability": round(audio_feats["danceability"], 3),
+                })
+        except Exception as e:
+            st.sidebar.error(f"Audio extraction failed: {e}")
+            audio_feats = None
+
+
+# ============================================================
+# Build inputs row (song-driven)
+# ============================================================
+inputs = pd.DataFrame([{
+    "file": filename,
+    "followers": followers,
+    "artist_popularity": artist_pop,
+    "year": year,
+    "genre": genre,
+    "danceability": None if audio_feats is None else audio_feats["danceability"],
+    "energy": None if audio_feats is None else audio_feats["energy"],
+    "loudness": None if audio_feats is None else audio_feats["loudness"],
+    "tempo": None if audio_feats is None else audio_feats["tempo"],
+    "valence": None if audio_feats is None else audio_feats["valence"],
+    "speechiness": None if audio_feats is None else audio_feats["speechiness"],
+    "acousticness": None if audio_feats is None else audio_feats["acousticness"],
+    "instrumentalness": None if audio_feats is None else audio_feats["instrumentalness"],
+    "liveness": None if audio_feats is None else audio_feats["liveness"],
+    "duration_ms": None if audio_feats is None else audio_feats["duration_ms"],
+    "key": None if audio_feats is None else audio_feats["key"],
+    "mode": None if audio_feats is None else audio_feats["mode"],
+}])
+
+
+# ============================================================
+# Run model
+# ============================================================
+pred_pop = None
+hit_like = None
+rec_bucket = None
+rec_text = None
+X = None
+
 if run:
-    # --- Breakout (rule-based, kept simple) ---
-    score = 0
-    if energy > 0.65: score += 1
-    if danceability > 0.60: score += 1
-    if loudness > -8: score += 1
-    if followers > 50000: score += 1
-    if artist_pop > 60: score += 1
-
-    breakout_prob = min(score * 0.12, 0.60)  # cap at 60%
-    hit_likelihood_placeholder.metric("Hit Likelihood", f"{round(breakout_prob * 100, 1)}%")
-
-    # --- Regression prediction ---
-    if not MODEL_PATH.exists():
-        pop_forecast_placeholder.error(f"Missing model file: {MODEL_PATH.as_posix()}")
-        rec_placeholder.info("Upload/commit the model artifact into /models and rerun.")
-        st.stop()
-
-    reg_pipeline = load_model(MODEL_PATH.as_posix())
-    expected_cols = safe_get_feature_names(reg_pipeline)
-
-    if expected_cols is None:
-        pop_forecast_placeholder.error("Could not read model feature schema (feature_names_in_ missing).")
-        rec_placeholder.info("Re-train using a pandas DataFrame so feature names are preserved.")
-        st.stop()
-
-    row = inputs_display.iloc[0]
-    X_input = build_model_input(row, expected_cols)
-
-    # Debug output (optional)
-    if show_debug:
-        st.divider()
-        st.subheader("Debug: Feature Alignment")
-        st.write("Model expects:", expected_cols)
-        st.write("X_input columns:", list(X_input.columns))
-        st.dataframe(X_input, use_container_width=True, hide_index=True)
-
-    # Predict
-    try:
-        pred_pop = float(reg_pipeline.predict(X_input)[0])
-        # Clamp just for display sanity
-        pred_pop_display = max(0.0, min(100.0, pred_pop))
-        pop_forecast_placeholder.metric("Predicted Popularity (0–100)", round(pred_pop_display, 1))
-    except Exception as e:
-        pop_forecast_placeholder.error(f"Prediction failed: {e}")
-        rec_placeholder.info("Fix inputs / schema mismatch, then rerun.")
-        st.stop()
-
-    # --- Interpret popularity (human-friendly) ---
-    if pred_pop_display >= 70:
-        pop_band = "Strong"
-    elif pred_pop_display >= 45:
-        pop_band = "Moderate"
+    if uploaded_audio is None or audio_feats is None:
+        st.error("Upload a song (MP3/WAV) first — the app is designed to be song-driven.")
     else:
-        pop_band = "Low"
+        try:
+            reg_pipeline = load_model(MODEL_PATH)
+        except Exception as e:
+            st.error(f"Could not load model at {MODEL_PATH}: {e}")
+            st.stop()
 
-    # --- Executive Recommendation (blends both signals) ---
-    if breakout_prob >= 0.40 and pred_pop_display >= 55:
-        recommendation = "Strong profile: high breakout signal + solid popularity forecast. Consider greenlighting release + promotion."
-        rec_placeholder.success(recommendation)
-    elif breakout_prob >= 0.25 and pred_pop_display >= 45:
-        recommendation = f"Promising: breakout signal is moderate and popularity forecast is {pop_band.lower()}. Consider small production tweaks + stronger marketing plan."
-        rec_placeholder.info(recommendation)
-    elif pred_pop_display >= 60 and breakout_prob < 0.25:
-        recommendation = "Popularity forecast is solid, but breakout signal is weak. Consider features/collabs/playlist strategy to improve breakout likelihood."
-        rec_placeholder.info(recommendation)
-    else:
-        recommendation = "Caution: projected breakout probability and popularity are low under current inputs. Consider revising production, positioning, or promotion before release."
-        rec_placeholder.warning(recommendation)
+        if not hasattr(reg_pipeline, "feature_names_in_"):
+            st.error(
+                "Your saved pipeline does not expose feature_names_in_. "
+                "Re-save the pipeline with a newer sklearn or store the feature list separately."
+            )
+            st.stop()
 
-    st.divider()
+        feature_names = list(reg_pipeline.feature_names_in_)
+        ui_vals = inputs.iloc[0].to_dict()
+        X = build_model_input(feature_names, ui_vals)
 
-    # ---------------- Production Assessment ----------------
-    st.subheader("Production Assessment")
+        try:
+            pred_val = float(reg_pipeline.predict(X)[0])
+            pred_val = float(np.clip(pred_val, 0.0, 100.0))
+            pred_pop = pred_val
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
+            st.stop()
 
-    strengths, weaknesses = [], []
+        hit_like = hit_likelihood_from_popularity(pred_pop)
+        rec_bucket, rec_text = recommendation_from_popularity(pred_pop)
 
-    if energy > 0.65: strengths.append("Energy aligns with high-performing tracks.")
-    else: weaknesses.append("Energy below common hit threshold (0.65).")
 
-    if danceability > 0.60: strengths.append("Danceability within competitive streaming range.")
-    else: weaknesses.append("Danceability below common engagement range (0.60).")
+# ============================================================
+# OVERVIEW TAB
+# ============================================================
+with tab_overview:
+    c1, c2, c3 = st.columns([1, 1, 1.2])
 
-    if loudness > -8: strengths.append("Loudness consistent with commercial production standards.")
-    else: weaknesses.append("Loudness below competitive streaming levels (-8 dB threshold).")
+    with c1:
+        val = "—" if hit_like is None else f"{hit_like*100:.1f}%"
+        st.markdown(
+            f"""
+            <div class="card">
+              <div class="card-title">Hit Likelihood</div>
+              <div class="card-value">{val}</div>
+              <div class="card-sub">Sigmoid mapping from model prediction (not stuck at 0%)</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    if followers > 50000: strengths.append("Strong baseline artist reach.")
-    else: weaknesses.append("Limited artist reach may constrain exposure.")
+    with c2:
+        val = "—" if pred_pop is None else f"{pred_pop:.1f}"
+        st.markdown(
+            f"""
+            <div class="card">
+              <div class="card-title">Predicted Popularity</div>
+              <div class="card-value">{val}</div>
+              <div class="card-sub">Regression pipeline output (0–100)</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("**Strengths**")
-        if strengths:
-            for s in strengths:
-                st.write("-", s)
+    with c3:
+        if rec_text is None:
+            st.markdown(
+                """
+                <div class="rec">
+                  <div class="rec-title">Executive Recommendation</div>
+                  <p class="rec-text">Upload a song and click <b>Run Forecast</b> to generate a recommendation.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
-            st.write("No structural strengths identified.")
+            st.markdown(
+                f"""
+                <div class="rec {rec_bucket}">
+                  <div class="rec-title">Executive Recommendation</div>
+                  <p class="rec-text">{rec_text}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    with colB:
-        st.markdown("**Areas for Improvement**")
-        if weaknesses:
-            for w in weaknesses:
-                st.write("-", w)
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
+    left, right = st.columns([1.2, 0.8])
+
+    with left:
+        st.subheader("What this app does")
+        st.markdown(
+            """
+            - Extracts **song-derived audio features** from your upload
+            - Combines them with **artist context** + **genre**
+            - Runs your trained **regression model** to predict popularity (0–100)
+            - Converts that into a clear **decision-ready recommendation**
+            """.strip()
+        )
+
+    with right:
+        st.subheader("Positive signals")
+        if audio_feats is None:
+            st.info("Upload a song to see signals.")
         else:
-            st.write("No material weaknesses identified.")
+            badges = score_badges(audio_feats)
+            if not badges:
+                st.caption("No positive signals detected based on current extraction.")
+            else:
+                for b in badges:
+                    st.markdown(f'<span class="chip">✓ {b}</span>', unsafe_allow_html=True)
 
-    st.divider()
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    # ---------------- Feature Importance ----------------
-    st.subheader("Top Model Drivers (Regression)")
-    importances = safe_get_feature_importance(reg_pipeline)
+    s1, s2 = st.columns([1, 1])
+    with s1:
+        if st.button("Save Current Scenario", use_container_width=True, disabled=(pred_pop is None)):
+            row = inputs.iloc[0].to_dict()
+            row["predicted_popularity"] = None if pred_pop is None else float(pred_pop)
+            row["hit_likelihood"] = None if hit_like is None else float(hit_like)
+            st.session_state["scenario_bank"].append(row)
+            st.success("Scenario saved.")
+    with s2:
+        if st.button("Clear Saved Scenarios", use_container_width=True):
+            st.session_state["scenario_bank"] = []
+            st.success("Cleared.")
 
-    if importances is None:
-        st.caption("Feature importance unavailable for this model type.")
+
+# ============================================================
+# FEATURES TAB
+# ============================================================
+with tab_features:
+    st.subheader("Song Features (from upload)")
+    if uploaded_audio is None:
+        st.info("Upload a song to view extracted features.")
+    elif audio_feats is None:
+        st.warning("Audio uploaded, but extraction failed. Check librosa install or file type.")
     else:
-        fi = pd.DataFrame({
-            "feature": expected_cols,
-            "importance": importances
-        }).sort_values("importance", ascending=False)
+        a, b = st.columns([1, 1])
+        with a:
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="card-title">File</div>
+                  <div class="card-value" style="font-size:18px;">{filename}</div>
+                  <div class="card-sub">Duration {seconds_to_mmss(audio_feats["duration_sec"])} · {audio_feats["duration_sec"]:.1f}s</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="card-title">Tempo</div>
+                  <div class="card-value">{audio_feats["tempo"]:.1f} BPM</div>
+                  <div class="card-sub">Beat tracking</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="card-title">Loudness</div>
+                  <div class="card-value">{audio_feats["loudness"]:.1f} dB</div>
+                  <div class="card-sub">RMS-based proxy</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        top_n = 10
-        st.write(f"Top {top_n} features influencing the popularity prediction:")
-        st.dataframe(fi.head(top_n), use_container_width=True, hide_index=True)
+            if audio_bytes is not None:
+                st.write("")
+                st.audio(audio_bytes)
 
-        # Streamlit will pick default styling; no custom colors needed
-        st.bar_chart(fi.head(top_n).set_index("feature")["importance"])
+        with b:
+            st.markdown("### Model Inputs (audio-driven)")
+            model_inputs_view = {
+                "danceability": audio_feats["danceability"],
+                "energy": audio_feats["energy"],
+                "valence": audio_feats["valence"],
+                "speechiness": audio_feats["speechiness"],
+                "acousticness": audio_feats["acousticness"],
+                "instrumentalness": audio_feats["instrumentalness"],
+                "liveness": audio_feats["liveness"],
+                "tempo": audio_feats["tempo"],
+                "loudness": audio_feats["loudness"],
+                "duration_ms": audio_feats["duration_ms"],
+                "key": audio_feats["key"],
+                "mode": audio_feats["mode"],
+            }
+            st.dataframe(pd.DataFrame([model_inputs_view]), use_container_width=True, hide_index=True)
 
-    st.divider()
+            st.markdown("### Artist Context")
+            st.dataframe(inputs[["followers", "artist_popularity", "year", "genre"]], use_container_width=True, hide_index=True)
 
-    # ---------------- Signal Strength ----------------
-    st.subheader("Signal Strength")
-    st.write("Breakout probability visualization based on structural alignment.")
-    st.progress(breakout_prob)
 
-else:
-    # Before run: keep placeholders neutral
-    hit_likelihood_placeholder.metric("Hit Likelihood", "—")
-    pop_forecast_placeholder.metric("Predicted Popularity (0–100)", "—")
-    rec_placeholder.info("Run the forecast to generate a recommendation and model drivers.")
+# ============================================================
+# COMPARE TAB
+# ============================================================
+with tab_compare:
+    st.subheader("Compare scenarios")
+    st.caption("Save multiple runs to compare songs/mixes.")
+
+    bank = st.session_state["scenario_bank"]
+    if not bank:
+        st.info("No scenarios saved yet. Run a forecast and click **Save Current Scenario**.")
+    else:
+        df = pd.DataFrame(bank)
+        order = [
+            "file", "predicted_popularity", "hit_likelihood",
+            "followers", "artist_popularity", "year", "genre",
+            "tempo", "loudness", "energy", "danceability", "valence",
+            "speechiness", "acousticness", "instrumentalness", "liveness",
+            "duration_ms", "key", "mode"
+        ]
+        order = [c for c in order if c in df.columns]
+        df = df[order + [c for c in df.columns if c not in order]]
+
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download Scenarios (CSV)",
+            data=csv_bytes,
+            file_name="beat_forecast_scenarios.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+# ============================================================
+# DEBUG TAB
+# ============================================================
+with tab_debug:
+    st.subheader("Debug / Proof")
+    st.caption("This tab proves the app is using your uploaded song AND your regression model.")
+
+    d1, d2 = st.columns([1, 1])
+
+    with d1:
+        st.markdown("### Extraction diagnostics")
+        if audio_feats is None:
+            st.info("Upload a song to populate diagnostics.")
+        else:
+            st.write({
+                "rms_mean": audio_feats["rms_mean"],
+                "onset_mean": audio_feats["onset_mean"],
+                "onset_std": audio_feats["onset_std"],
+                "centroid_mean": audio_feats["centroid_mean"],
+                "flatness_mean": audio_feats["flatness_mean"],
+                "zcr_mean": audio_feats["zcr_mean"],
+            })
+
+    with d2:
+        st.markdown("### Model input row (X)")
+        if X is None:
+            st.info("Run Forecast to generate X.")
+        else:
+            st.dataframe(X, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+    st.markdown("### Inputs used for prediction")
+    st.dataframe(inputs, use_container_width=True, hide_index=True)
+
+    csv_bytes = inputs.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Current Inputs (CSV)",
+        data=csv_bytes,
+        file_name="beat_forecast_inputs.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
