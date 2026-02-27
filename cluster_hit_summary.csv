@@ -1,0 +1,7 @@
+cluster,total_songs,hit_count,hit_rate,avg_popularity,relative_to_overall,name
+0,17483,130,0.0074,19.6,1.36,Mainstream Upbeat Pop
+1,11643,63,0.0054,16.9,0.99,Acoustic / Emotional Ballads
+2,16708,75,0.0045,17.0,0.82,High-Energy Fast-Tempo Tracks
+3,4103,11,0.0027,15.0,0.49,Live / Performance-Driven Songs
+4,5973,12,0.002,14.0,0.37,Instrumental / Atmospheric Tracks
+5,4090,36,0.0088,21.7,1.62,Speech-Heavy Hip-Hop / Rap
