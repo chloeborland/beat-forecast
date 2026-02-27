@@ -1,14 +1,48 @@
 import streamlit as st
 import pandas as pd
+import json
+import joblib
 
-st.set_page_config(
-    page_title="Beat Forecast",
-    layout="wide"
-)
+st.set_page_config(page_title="Beat Forecast", layout="wide")
 
+# ---------------- Clustering Helpers ----------------
+@st.cache_resource
+def load_clustering_assets():
+    scaler = joblib.load("cluster_scaler.pkl")
+    kmeans = joblib.load("kmeans_k6.pkl")
+    with open("cluster_feature_list.json", "r") as f:
+        feats = json.load(f)
+
+    labels = pd.read_csv("cluster_labels.csv")  # cluster,name,description
+    hit_summary = pd.read_csv("cluster_hit_summary.csv")  # cluster,name,hit_rate,...
+    try:
+        top2024 = pd.read_csv("cluster_top2024_lift.csv")  # name, lift, etc
+    except Exception:
+        top2024 = None
+
+    return scaler, kmeans, feats, labels, hit_summary, top2024
+
+
+def predict_archetype(user_inputs: dict):
+    scaler, kmeans, feats, labels, hit_summary, top2024 = load_clustering_assets()
+
+    X = pd.DataFrame([{f: user_inputs.get(f) for f in feats}]).reindex(columns=feats)
+    Xs = scaler.transform(X)
+    cid = int(kmeans.predict(Xs)[0])
+
+    lab = labels[labels["cluster"] == cid].head(1)
+    name = lab["name"].iloc[0] if len(lab) else f"Cluster {cid}"
+    desc = lab["description"].iloc[0] if len(lab) else ""
+
+    hs = hit_summary[hit_summary["cluster"] == cid].head(1)
+    t24 = top2024[top2024["name"] == name].head(1) if top2024 is not None else None
+
+    return cid, name, desc, hs, t24
+
+
+# ---------------- Header ----------------
 st.title("Beat Forecast")
 st.caption("Data-driven decision support for estimating Spotify performance prior to release.")
-
 st.divider()
 
 # ---------------- Market Context ----------------
@@ -31,7 +65,7 @@ st.divider()
 st.sidebar.header("Model Inputs")
 
 with st.sidebar.expander("Artist Context", expanded=True):
-    followers = st.number_input("Artist Followers", min_value=0, value=5000, step=100)
+    followers = st.number_input("Spotify Followers", min_value=0, value=5000, step=100)
     artist_pop = st.slider("Artist Popularity (0–100)", 0, 100, 35)
 
 with st.sidebar.expander("Audio Features", expanded=True):
@@ -43,6 +77,11 @@ with st.sidebar.expander("Audio Features", expanded=True):
     speechiness = st.slider("Speechiness", 0.0, 1.0, 0.10)
     acousticness = st.slider("Acousticness", 0.0, 1.0, 0.10)
 
+    #  required for clustering model
+    instrumentalness = st.slider("Instrumentalness", 0.0, 1.0, 0.00)
+    liveness = st.slider("Liveness", 0.0, 1.0, 0.15)
+    duration_ms = st.number_input("Duration (ms)", min_value=0, value=210000, step=1000)
+
 st.sidebar.divider()
 run = st.sidebar.button("Run Forecast", type="primary")
 
@@ -51,18 +90,19 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     st.subheader("Breakout Probability")
-    st.metric("Hit Likelihood", "—")
+    hit_metric = st.metric("Hit Likelihood", "—")
 
 with col2:
     st.subheader("Popularity Forecast")
-    st.metric("Predicted Popularity (0–100)", "—")
+    pop_metric = st.metric("Predicted Popularity (0–100)", "—")
 
 with col3:
     st.subheader("Executive Recommendation")
-    st.info("Model connection pending. Recommendation will appear here.")
+    rec_box = st.info("Model connection pending. Recommendation will appear here.")
 
 st.divider()
 
+# ---------------- Input Summary ----------------
 st.subheader("Input Summary")
 
 inputs = pd.DataFrame([{
@@ -75,10 +115,16 @@ inputs = pd.DataFrame([{
     "valence": valence,
     "speechiness": speechiness,
     "acousticness": acousticness,
+    "instrumentalness": instrumentalness,
+    "liveness": liveness,
+    "duration_ms": duration_ms,
 }])
 
 st.dataframe(inputs, use_container_width=True, hide_index=True)
+
 st.divider()
+
+# ---------------- Scenario Comparison ----------------
 st.subheader("Scenario Comparison")
 
 if "scenarios" not in st.session_state:
@@ -101,49 +147,83 @@ else:
 
 st.divider()
 
+# ---------------- Drivers ----------------
 st.subheader("Performance Drivers")
 st.write("Directional guidance will appear here. Model-based feature importance will be added during final integration.")
 
+# ---------------- Run Forecast ----------------
 if run:
-    # --- Simple Rule-Based Scoring (Temporary Logic) ---
+    # ----- Temporary rule-based scoring (kept as placeholder) -----
     score = 0
-
-    # Production thresholds (aligned with report findings)
-    if energy > 0.65:
-        score += 1
-    if danceability > 0.60:
-        score += 1
-    if loudness > -8:
-        score += 1
-
-    # Artist leverage
-    if followers > 50000:
-        score += 1
-    if artist_pop > 60:
-        score += 1
+    if energy > 0.65: score += 1
+    if danceability > 0.60: score += 1
+    if loudness > -8: score += 1
+    if followers > 50000: score += 1
+    if artist_pop > 60: score += 1
 
     breakout_prob = min(score * 0.12, 0.60)  # cap at 60%
     predicted_popularity = 20 + (score * 8)
 
-    # --- Update Metrics ---
     col1.metric("Hit Likelihood", f"{round(breakout_prob * 100, 1)}%")
     col2.metric("Predicted Popularity (0–100)", round(predicted_popularity, 1))
 
-    # --- Recommendation Logic ---
     if breakout_prob > 0.40:
         recommendation = "Release-ready under current production and exposure profile."
+        col3.success(recommendation)
     elif breakout_prob > 0.25:
         recommendation = "Moderate breakout potential. Consider production refinements or stronger promotion."
+        col3.warning(recommendation)
     else:
         recommendation = "Low projected breakout probability under current inputs."
-
-    col3.success(recommendation)
+        col3.error(recommendation)
 
     st.divider()
+
+    # ----- ✅ Clustering Archetype -----
+    st.subheader("Song Archetype (Clustering)")
+
+    cluster_inputs = {
+        "danceability": danceability,
+        "energy": energy,
+        "valence": valence,
+        "tempo": tempo,
+        "loudness": loudness,
+        "acousticness": acousticness,
+        "speechiness": speechiness,
+        "instrumentalness": instrumentalness,
+        "liveness": liveness,
+        "duration_ms": duration_ms,
+    }
+
+    try:
+        cid, archetype, archetype_desc, hs, t24 = predict_archetype(cluster_inputs)
+        st.write(f"**{archetype}**")
+        if archetype_desc:
+            st.caption(archetype_desc)
+
+        if len(hs):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Hit rate (pop≥70)", f"{hs['hit_rate'].iloc[0]:.3f}")
+            # your csv might name this column relative_to_overall or enrichment_ratio
+            rel_col = "relative_to_overall" if "relative_to_overall" in hs.columns else ("enrichment_ratio" if "enrichment_ratio" in hs.columns else None)
+            if rel_col:
+                c2.metric("Relative to overall", f"{hs[rel_col].iloc[0]:.2f}×")
+            else:
+                c2.metric("Relative to overall", "—")
+            c3.metric("Avg popularity", f"{hs['avg_popularity'].iloc[0]:.1f}" if "avg_popularity" in hs.columns else "—")
+
+        if t24 is not None and len(t24) and "lift" in t24.columns:
+            st.metric("Top-2024 lift", f"{t24['lift'].iloc[0]:.2f}×")
+
+    except Exception as e:
+        st.error(f"Clustering could not run. Check that all clustering files exist and match expected names. Details: {e}")
+
+    st.divider()
+
+    # ----- Production Assessment (kept) -----
     st.subheader("Production Assessment")
 
-    strengths = []
-    weaknesses = []
+    strengths, weaknesses = [], []
 
     if energy > 0.65:
         strengths.append("Energy aligns with high-performing tracks.")
