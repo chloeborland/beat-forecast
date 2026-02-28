@@ -1,3 +1,5 @@
+
+
 import io
 import json
 import joblib
@@ -6,14 +8,8 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
-# Audio extraction (optional)
-try:
-    import librosa
-except Exception:
-    librosa = None
-
 # ============================================================
-# Page config + Green theme CSS
+# Page config MUST be the first Streamlit call
 # ============================================================
 st.set_page_config(
     page_title="Beat Forecast",
@@ -22,83 +18,36 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-      :root{
-        --green-900:#0b3d2e;
-        --green-800:#0f5a3f;
-        --green-700:#137a53;
-        --green-100:#e7f5ee;
-        --green-050:#f2fbf6;
-
-        --text:#1f2328;
-        --muted:rgba(31,35,40,0.65);
-        --border:rgba(31,35,40,0.10);
-        --shadow:0 10px 24px rgba(0,0,0,0.06);
-      }
-
-      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1200px; }
-      [data-testid="stSidebar"] { border-right: 1px solid var(--border); }
-
-      h1, h2, h3 { letter-spacing: -0.02em; }
-      .muted { color: var(--muted); }
-
-      div.stButton > button[kind="primary"]{
-        background: linear-gradient(180deg, var(--green-700), var(--green-800));
-        border: 1px solid rgba(19,122,83,0.35);
-        color: white;
-        border-radius: 14px;
-        padding: 0.7rem 1rem;
-        box-shadow: var(--shadow);
-      }
-
-      .card{
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 16px;
-        background: rgba(255,255,255,0.85);
-        box-shadow: var(--shadow);
-      }
-      .card-title{ font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-      .card-value{ font-size: 32px; font-weight: 800; line-height: 1.05; color: var(--text); }
-      .card-sub{ font-size: 12px; color: rgba(31,35,40,0.55); margin-top: 6px; }
-
-      .chip{
-        display: inline-block;
-        padding: 5px 10px;
-        border-radius: 999px;
-        background: var(--green-100);
-        border: 1px solid rgba(19,122,83,0.18);
-        color: var(--green-900);
-        font-weight: 750;
-        font-size: 12px;
-        margin: 0 8px 8px 0;
-      }
-
-      .rec{
-        border-radius: 16px;
-        padding: 16px;
-        border: 1px solid rgba(19,122,83,0.18);
-        box-shadow: var(--shadow);
-      }
-      .rec.good{ background: rgba(19,122,83,0.14); }
-      .rec.mid{ background: rgba(242, 192, 86, 0.18); border-color: rgba(242,192,86,0.35); }
-      .rec.low{ background: rgba(220, 53, 69, 0.10); border-color: rgba(220,53,69,0.20); }
-      .rec-title{ font-size: 14px; font-weight: 850; margin-bottom: 6px; color: var(--text); }
-      .rec-text{ margin: 0; color: rgba(31,35,40,0.78); }
-
-      .hr{ height: 1px; background: rgba(31,35,40,0.08); margin: 12px 0 14px 0; }
-      footer {visibility: hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 # ============================================================
-# Paths (standardize like your main version)
+# Paths + CSS
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
+
+def load_css(rel_path: str):
+    css_path = BASE_DIR / rel_path
+    if css_path.exists():
+        st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+
+load_css("assets/theme.css")
+
+# Optional sidebar logo (won’t crash if missing)
+logo_path = BASE_DIR / "assets" / "logo.png"
+if logo_path.exists():
+    st.sidebar.image(str(logo_path), use_container_width=True)
+    st.sidebar.markdown("---")
+else:
+    st.sidebar.caption("Logo not found: assets/logo.png")
+
+# Audio extraction (optional)
+try:
+    import librosa
+except Exception:
+    librosa = None
+
+
+# ============================================================
+# Model / asset paths (standardized)
+# ============================================================
 MODELS_DIR = BASE_DIR / "models"
 POP_MODEL_PATH = MODELS_DIR / "pop_rf_pipeline.joblib"
 HIT_MODEL_PATH = MODELS_DIR / "hit_gb_pipeline_wade.joblib"
@@ -109,6 +58,7 @@ CLUSTER_FEATS_PATH = BASE_DIR / "cluster_feature_list.json"
 CLUSTER_LABELS_PATH = BASE_DIR / "cluster_labels.csv"
 CLUSTER_HIT_SUMMARY_PATH = BASE_DIR / "cluster_hit_summary.csv"
 CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
+
 
 # ============================================================
 # Cached loaders
@@ -136,6 +86,7 @@ def load_clustering_assets():
         top2024 = None
 
     return scaler, kmeans, feats, labels, hit_summary, top2024
+
 
 # ============================================================
 # Utilities
@@ -175,10 +126,10 @@ def predict_archetype(user_inputs: dict):
 def build_regression_input(df_row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
     X = pd.DataFrame([{c: 0 for c in expected_cols}])
 
-    # Map app fields to model fields
-    if "total_artist_followers" in expected_cols:
+    # Artist context mapping
+    if "total_artist_followers" in expected_cols and df_row.get("followers") is not None:
         X.loc[0, "total_artist_followers"] = float(df_row["followers"])
-    if "avg_artist_popularity" in expected_cols:
+    if "avg_artist_popularity" in expected_cols and df_row.get("artist_popularity") is not None:
         X.loc[0, "avg_artist_popularity"] = float(df_row["artist_popularity"])
 
     direct_map = {
@@ -201,7 +152,7 @@ def build_regression_input(df_row: pd.Series, expected_cols: list[str]) -> pd.Da
         if model_k in expected_cols and df_row.get(app_k) is not None:
             X.loc[0, model_k] = float(df_row[app_k])
 
-    # Optional genre one-hot
+    # Optional genre one-hot if the regression model expects it
     if "genre" in df_row.index:
         genre_col = f"genre_{df_row['genre']}"
         if genre_col in expected_cols:
@@ -210,7 +161,6 @@ def build_regression_input(df_row: pd.Series, expected_cols: list[str]) -> pd.Da
     return X[expected_cols]
 
 def recommendation_from_models(breakout_prob: float, pred_pop: float) -> tuple[str, str]:
-    # Combine both signals like your main logic
     if pred_pop >= 70:
         pop_band = "strong"
     elif pred_pop >= 45:
@@ -240,8 +190,9 @@ def score_badges(audio_feats: dict) -> list[str]:
         badges.append("High energy")
     return badges[:4]
 
+
 # ============================================================
-# Audio feature extraction (from your green app)
+# Audio feature extraction
 # ============================================================
 def clip01(x: float) -> float:
     return float(np.clip(x, 0.0, 1.0))
@@ -348,32 +299,13 @@ def extract_audio_features(file_bytes: bytes) -> dict:
         "mode": int(mode),
     }
 
+
 # ============================================================
 # State
 # ============================================================
 if "scenario_bank" not in st.session_state:
     st.session_state["scenario_bank"] = []
 
-# ============================================================
-# Header
-# ============================================================
-l, r = st.columns([2.4, 1])
-with l:
-    st.title("Beat Forecast")
-    st.markdown('<span class="muted">Song upload → audio features → models → recommendation</span>', unsafe_allow_html=True)
-with r:
-    st.markdown(
-        """
-        <div class="card">
-          <div class="card-title">Theme</div>
-          <div class="card-value" style="font-size:18px; color: var(--green-900);">Green Executive Dashboard</div>
-          <div class="card-sub">Clustering + Hit Prob + Popularity Forecast</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
 # ============================================================
 # Sidebar (song-driven)
@@ -392,7 +324,7 @@ with st.sidebar.expander("Genre", expanded=True):
     genre = st.selectbox(
         "Primary Genre",
         ["Pop", "Rock", "Hip-Hop", "R&B", "Electronic", "Country", "Jazz", "Folk", "Classical"],
-        index=0
+        index=0,
     )
 
 show_debug = st.sidebar.checkbox("Show debug (feature alignment)", value=False)
@@ -400,12 +332,14 @@ show_debug = st.sidebar.checkbox("Show debug (feature alignment)", value=False)
 st.sidebar.markdown("---")
 run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True)
 
+
 # ============================================================
-# Tabs (keep your green UX)
+# Tabs
 # ============================================================
 tab_overview, tab_features, tab_compare, tab_debug = st.tabs(
     ["Overview", "Song Features", "Compare Scenarios", "Debug"]
 )
+
 
 # ============================================================
 # Extract features on upload
@@ -423,40 +357,48 @@ if uploaded_audio is not None:
             audio_bytes = uploaded_audio.read()
             audio_feats = extract_audio_features(audio_bytes)
             with st.sidebar.expander("Extracted (from upload)", expanded=False):
-                st.write({
-                    "file": filename,
-                    "duration": seconds_to_mmss(audio_feats["duration_sec"]),
-                    "tempo": round(audio_feats["tempo"], 1),
-                    "loudness_db": round(audio_feats["loudness"], 2),
-                    "energy": round(audio_feats["energy"], 3),
-                    "danceability": round(audio_feats["danceability"], 3),
-                })
+                st.write(
+                    {
+                        "file": filename,
+                        "duration": seconds_to_mmss(audio_feats["duration_sec"]),
+                        "tempo": round(audio_feats["tempo"], 1),
+                        "loudness_db": round(audio_feats["loudness"], 2),
+                        "energy": round(audio_feats["energy"], 3),
+                        "danceability": round(audio_feats["danceability"], 3),
+                    }
+                )
         except Exception as e:
             st.sidebar.error(f"Audio extraction failed: {e}")
             audio_feats = None
 
+
 # ============================================================
-# Build inputs row (song-driven)
+# Build inputs row
 # ============================================================
-inputs = pd.DataFrame([{
-    "file": filename,
-    "followers": followers,
-    "artist_popularity": artist_pop,
-    "year": year,
-    "genre": genre,
-    "danceability": None if audio_feats is None else audio_feats["danceability"],
-    "energy": None if audio_feats is None else audio_feats["energy"],
-    "loudness": None if audio_feats is None else audio_feats["loudness"],
-    "tempo": None if audio_feats is None else audio_feats["tempo"],
-    "valence": None if audio_feats is None else audio_feats["valence"],
-    "speechiness": None if audio_feats is None else audio_feats["speechiness"],
-    "acousticness": None if audio_feats is None else audio_feats["acousticness"],
-    "instrumentalness": None if audio_feats is None else audio_feats["instrumentalness"],
-    "liveness": None if audio_feats is None else audio_feats["liveness"],
-    "duration_ms": None if audio_feats is None else audio_feats["duration_ms"],
-    "key": None if audio_feats is None else audio_feats["key"],
-    "mode": None if audio_feats is None else audio_feats["mode"],
-}])
+inputs = pd.DataFrame(
+    [
+        {
+            "file": filename,
+            "followers": followers,
+            "artist_popularity": artist_pop,
+            "year": year,
+            "genre": genre,
+            "danceability": None if audio_feats is None else audio_feats["danceability"],
+            "energy": None if audio_feats is None else audio_feats["energy"],
+            "loudness": None if audio_feats is None else audio_feats["loudness"],
+            "tempo": None if audio_feats is None else audio_feats["tempo"],
+            "valence": None if audio_feats is None else audio_feats["valence"],
+            "speechiness": None if audio_feats is None else audio_feats["speechiness"],
+            "acousticness": None if audio_feats is None else audio_feats["acousticness"],
+            "instrumentalness": None if audio_feats is None else audio_feats["instrumentalness"],
+            "liveness": None if audio_feats is None else audio_feats["liveness"],
+            "duration_ms": None if audio_feats is None else audio_feats["duration_ms"],
+            "key": None if audio_feats is None else audio_feats["key"],
+            "mode": None if audio_feats is None else audio_feats["mode"],
+        }
+    ]
+)
+
 
 # ============================================================
 # Run models
@@ -470,25 +412,22 @@ X_reg = None
 X_gb = None
 
 if run:
-    # Hard requirements for a real run
     if uploaded_audio is None or audio_feats is None:
         st.error("Upload a song (MP3/WAV) first — this version is song-driven.")
     else:
-        # File checks
         missing = []
         if not POP_MODEL_PATH.exists(): missing.append(POP_MODEL_PATH.as_posix())
         if not HIT_MODEL_PATH.exists(): missing.append(HIT_MODEL_PATH.as_posix())
         for p in [CLUSTER_SCALER_PATH, KMEANS_PATH, CLUSTER_FEATS_PATH, CLUSTER_LABELS_PATH, CLUSTER_HIT_SUMMARY_PATH]:
             if not p.exists():
                 missing.append(p.as_posix())
-
         if missing:
             st.error("Missing required files:\n- " + "\n- ".join(missing))
             st.stop()
 
         row = inputs.iloc[0]
 
-        # 1) Breakout probability (GB classifier)
+        # 1) Breakout prob (GB classifier)
         gb_model = load_gb_hit_model()
         if not hasattr(gb_model, "feature_names_in_"):
             st.error("GB model missing feature_names_in_. Re-train with pandas DataFrame to preserve schema.")
@@ -514,7 +453,7 @@ if run:
         X_gb = pd.DataFrame([gb_base]).reindex(columns=gb_expected)
         breakout_prob = float(gb_model.predict_proba(X_gb)[:, 1][0])
 
-        # 2) Popularity forecast (regression)
+        # 2) Popularity (regression)
         reg_pipeline = load_regression_pipeline()
         reg_expected = safe_get_feature_names(reg_pipeline)
         if reg_expected is None:
@@ -543,22 +482,43 @@ if run:
         except Exception as e:
             archetype_out = ("—", "Archetype unavailable", str(e), pd.DataFrame(), None)
 
-        # 4) Recommendation uses BOTH models (not proxy)
+        # 4) Recommendation
         rec_bucket, rec_text = recommendation_from_models(breakout_prob, pred_pop)
+
 
 # ============================================================
 # OVERVIEW TAB
 # ============================================================
 with tab_overview:
+    h1, h2 = st.columns([2.5, 1])
+    with h1:
+        st.title("BeatForecast")
+        st.markdown('<div class="kicker">INSIGHTS THAT MOVE MUSIC FORWARD</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small-muted">Song upload → audio features → models → recommendation</div>', unsafe_allow_html=True)
+    with h2:
+        st.markdown(
+            """
+            <div class="card">
+              <div class="card-title">Modules</div>
+              <div class="card-sub">Clustering · Hit Prob · Popularity Forecast</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
     c1, c2, c3 = st.columns([1, 1, 1.2])
 
+    hit_val = "—" if breakout_prob is None else f"{breakout_prob*100:.1f}%"
+    pop_val = "—" if pred_pop is None else f"{pred_pop:.1f}"
+
     with c1:
-        val = "—" if breakout_prob is None else f"{breakout_prob*100:.1f}%"
         st.markdown(
             f"""
             <div class="card">
               <div class="card-title">Hit Likelihood (GB Model)</div>
-              <div class="card-value">{val}</div>
+              <div class="card-value">{hit_val}</div>
               <div class="card-sub">Gradient boosting classifier probability</div>
             </div>
             """,
@@ -566,12 +526,11 @@ with tab_overview:
         )
 
     with c2:
-        val = "—" if pred_pop is None else f"{pred_pop:.1f}"
         st.markdown(
             f"""
             <div class="card">
               <div class="card-title">Predicted Popularity</div>
-              <div class="card-value">{val}</div>
+              <div class="card-value">{pop_val}</div>
               <div class="card-sub">Regression pipeline output (0–100)</div>
             </div>
             """,
@@ -603,7 +562,6 @@ with tab_overview:
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     left, right = st.columns([1.2, 0.8])
-
     with left:
         st.subheader("What this app does")
         st.markdown(
@@ -633,17 +591,16 @@ with tab_overview:
     s1, s2 = st.columns([1, 1])
     with s1:
         if st.button("Save Current Scenario", use_container_width=True, disabled=(pred_pop is None)):
-            row = inputs.iloc[0].to_dict()
-            row["predicted_popularity"] = None if pred_pop is None else float(pred_pop)
-            row["hit_likelihood"] = None if breakout_prob is None else float(breakout_prob)
-            st.session_state["scenario_bank"].append(row)
+            row2 = inputs.iloc[0].to_dict()
+            row2["predicted_popularity"] = None if pred_pop is None else float(pred_pop)
+            row2["hit_likelihood"] = None if breakout_prob is None else float(breakout_prob)
+            st.session_state["scenario_bank"].append(row2)
             st.success("Scenario saved.")
     with s2:
         if st.button("Clear Saved Scenarios", use_container_width=True):
             st.session_state["scenario_bank"] = []
             st.success("Cleared.")
 
-    # Archetype summary (optional, but useful)
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.subheader("Song Archetype (Clustering)")
     if archetype_out is None:
@@ -653,6 +610,7 @@ with tab_overview:
         st.write(f"**{archetype}**")
         if archetype_desc:
             st.caption(archetype_desc)
+
 
 # ============================================================
 # FEATURES TAB
@@ -737,6 +695,7 @@ with tab_features:
     else:
         st.caption("Run forecast to see model drivers.")
 
+
 # ============================================================
 # COMPARE TAB
 # ============================================================
@@ -759,12 +718,13 @@ with tab_compare:
             use_container_width=True,
         )
 
+
 # ============================================================
 # DEBUG TAB
 # ============================================================
 with tab_debug:
     st.subheader("Debug")
-    st.caption("Shows extraction + model input rows (X) used in prediction.")
+    st.caption("Shows extraction + model input rows used in prediction.")
 
     d1, d2 = st.columns([1, 1])
     with d1:
