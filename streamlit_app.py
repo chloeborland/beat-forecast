@@ -1,5 +1,3 @@
-
-
 import io
 import json
 import joblib
@@ -23,17 +21,19 @@ st.set_page_config(
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 
+
 def load_css(rel_path: str):
     css_path = BASE_DIR / rel_path
     if css_path.exists():
         st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+
 
 load_css("assets/theme.css")
 
 # Optional sidebar logo (won’t crash if missing)
 logo_path = BASE_DIR / "assets" / "logo.png"
 if logo_path.exists():
-    st.sidebar.image(str(logo_path), use_container_width=True)
+    st.sidebar.image(str(logo_path), width=220)
     st.sidebar.markdown("---")
 else:
     st.sidebar.caption("Logo not found: assets/logo.png")
@@ -44,13 +44,14 @@ try:
 except Exception:
     librosa = None
 
-
 # ============================================================
-# Model / asset paths (standardized)
+# Model / asset paths
 # ============================================================
 MODELS_DIR = BASE_DIR / "models"
 POP_MODEL_PATH = MODELS_DIR / "pop_rf_pipeline.joblib"
-HIT_MODEL_PATH = MODELS_DIR / "hit_gb_pipeline_wade.joblib"
+
+# Hit/classification model (your initial findings pipeline)
+HIT_MODEL_PATH = BASE_DIR / "hit_gb_pipeline_wade_compat.joblib"
 
 CLUSTER_SCALER_PATH = BASE_DIR / "cluster_scaler.pkl"
 KMEANS_PATH = BASE_DIR / "kmeans_k6.pkl"
@@ -59,7 +60,6 @@ CLUSTER_LABELS_PATH = BASE_DIR / "cluster_labels.csv"
 CLUSTER_HIT_SUMMARY_PATH = BASE_DIR / "cluster_hit_summary.csv"
 CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
 
-
 # ============================================================
 # Cached loaders
 # ============================================================
@@ -67,9 +67,11 @@ CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
 def load_regression_pipeline():
     return joblib.load(POP_MODEL_PATH.as_posix())
 
+
 @st.cache_resource
-def load_gb_hit_model():
+def load_hit_pipeline():
     return joblib.load(HIT_MODEL_PATH.as_posix())
+
 
 @st.cache_resource
 def load_clustering_assets():
@@ -100,12 +102,15 @@ def safe_get_feature_names(pipeline):
                 return list(step.feature_names_in_)
     return None
 
+
 def safe_get_feature_importance(pipeline):
+    # Your RF pipeline uses named_steps["model"] (based on your helper)
     if hasattr(pipeline, "named_steps") and "model" in pipeline.named_steps:
         model = pipeline.named_steps["model"]
         if hasattr(model, "feature_importances_"):
             return model.feature_importances_
     return None
+
 
 def predict_archetype(user_inputs: dict):
     scaler, kmeans, feats, labels, hit_summary, top2024 = load_clustering_assets()
@@ -123,12 +128,19 @@ def predict_archetype(user_inputs: dict):
 
     return cid, name, desc, hs, t24
 
+
 def build_regression_input(df_row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
+    """
+    Builds an aligned regression input row with the exact expected columns.
+    Includes safe handling for optional features that may not exist in the app.
+    """
     X = pd.DataFrame([{c: 0 for c in expected_cols}])
 
     # Artist context mapping
     if "total_artist_followers" in expected_cols and df_row.get("followers") is not None:
         X.loc[0, "total_artist_followers"] = float(df_row["followers"])
+
+    # If your regression model expects avg_artist_popularity, only set it if it exists in df_row
     if "avg_artist_popularity" in expected_cols and df_row.get("artist_popularity") is not None:
         X.loc[0, "avg_artist_popularity"] = float(df_row["artist_popularity"])
 
@@ -160,21 +172,73 @@ def build_regression_input(df_row: pd.Series, expected_cols: list[str]) -> pd.Da
 
     return X[expected_cols]
 
-def recommendation_from_models(breakout_prob: float, pred_pop: float) -> tuple[str, str]:
-    if pred_pop >= 70:
-        pop_band = "strong"
-    elif pred_pop >= 45:
-        pop_band = "moderate"
-    else:
-        pop_band = "low"
 
-    if breakout_prob >= 0.40 and pred_pop >= 55:
-        return "good", "Strong profile: high breakout probability + solid popularity forecast. Greenlight release + promotion."
-    if breakout_prob >= 0.25 and pred_pop >= 45:
-        return "mid", f"Promising: breakout signal moderate and popularity forecast is {pop_band}. Consider tweaks + stronger marketing plan."
-    if pred_pop >= 60 and breakout_prob < 0.25:
-        return "mid", "Popularity forecast is solid but breakout signal is weak. Consider collabs/playlist strategy to lift breakout odds."
-    return "low", "Caution: projected breakout probability and popularity are low. Consider revising production/positioning/promo."
+def build_hit_input(df_row: pd.Series) -> pd.DataFrame:
+    """
+    Hit model (GradientBoosting pipeline) expects these 13 columns:
+      danceability, energy, loudness, speechiness, acousticness, instrumentalness,
+      liveness, valence, tempo, duration_ms, key, mode, total_artist_followers
+    """
+    hit_cols = [
+        "danceability",
+        "energy",
+        "loudness",
+        "speechiness",
+        "acousticness",
+        "instrumentalness",
+        "liveness",
+        "valence",
+        "tempo",
+        "duration_ms",
+        "key",
+        "mode",
+        "total_artist_followers",
+    ]
+
+    X = pd.DataFrame([{c: np.nan for c in hit_cols}])
+
+    # Audio features
+    for c in [
+        "danceability",
+        "energy",
+        "loudness",
+        "speechiness",
+        "acousticness",
+        "instrumentalness",
+        "liveness",
+        "valence",
+        "tempo",
+        "duration_ms",
+        "key",
+        "mode",
+    ]:
+        X.loc[0, c] = df_row.get(c)
+
+    # Followers (same as your sidebar "Spotify Followers")
+    X.loc[0, "total_artist_followers"] = df_row.get("followers")
+
+    return X[hit_cols]
+
+
+def recommendation_from_scores(pred_pop: float, hit_pct: float) -> tuple[str, str]:
+    """
+    Combines regression popularity + hit likelihood.
+    Keep thresholds simple and demo-friendly.
+    """
+    # Guard
+    pred_pop = float(pred_pop)
+    hit_pct = float(hit_pct)
+
+    if pred_pop >= 70 and hit_pct >= 70:
+        return "good", "Strong outlook across popularity and hit likelihood. Greenlight release + promotion."
+    if pred_pop >= 70 and hit_pct < 70:
+        return "mid", "Popularity forecast is strong, but hit likelihood is lower. Consider targeted marketing and A/B testing hooks."
+    if pred_pop < 70 and hit_pct >= 70:
+        return "mid", "Hit likelihood is promising, but popularity forecast is moderate. Consider refining production/positioning and testing snippets."
+    if pred_pop >= 45 or hit_pct >= 45:
+        return "mid", "Mixed signals. Consider minor refinements and focused promotion rather than a full push."
+    return "low", "Cautious outlook. Consider revising production/positioning before investing heavily."
+
 
 def score_badges(audio_feats: dict) -> list[str]:
     if audio_feats is None:
@@ -197,16 +261,19 @@ def score_badges(audio_feats: dict) -> list[str]:
 def clip01(x: float) -> float:
     return float(np.clip(x, 0.0, 1.0))
 
+
 def normalize_minmax(x: float, xmin: float, xmax: float) -> float:
     if xmax <= xmin:
         return 0.0
     return clip01((x - xmin) / (xmax - xmin))
+
 
 def seconds_to_mmss(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     m = int(seconds // 60)
     s = int(round(seconds % 60))
     return f"{m}:{s:02d}"
+
 
 def estimate_key_mode(chroma_mean: np.ndarray) -> tuple[int, int]:
     major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -220,8 +287,10 @@ def estimate_key_mode(chroma_mean: np.ndarray) -> tuple[int, int]:
         minr = np.roll(minor_profile, k)
         maj_score = np.corrcoef(chroma, maj / maj.sum())[0, 1]
         min_score = np.corrcoef(chroma, minr / minr.sum())[0, 1]
-        if np.isnan(maj_score): maj_score = -1e9
-        if np.isnan(min_score): min_score = -1e9
+        if np.isnan(maj_score):
+            maj_score = -1e9
+        if np.isnan(min_score):
+            min_score = -1e9
         if maj_score > best_score:
             best_score = maj_score
             best_key = k
@@ -231,6 +300,7 @@ def estimate_key_mode(chroma_mean: np.ndarray) -> tuple[int, int]:
             best_key = k
             best_mode = 0
     return int(best_key), int(best_mode)
+
 
 def extract_audio_features(file_bytes: bytes) -> dict:
     if librosa is None:
@@ -313,11 +383,12 @@ if "scenario_bank" not in st.session_state:
 st.sidebar.markdown("## Inputs")
 st.sidebar.caption("Upload a song, set artist context + genre, then run.")
 
-uploaded_audio = st.sidebar.file_uploader("Upload MP3/WAV", type=["mp3", "wav"], accept_multiple_files=False)
+uploaded_audio = st.sidebar.file_uploader(
+    "Upload MP3/WAV", type=["mp3", "wav"], accept_multiple_files=False
+)
 
 with st.sidebar.expander("Artist Context", expanded=True):
-    followers = st.number_input("Artist Followers", min_value=0, value=5000, step=100)
-    artist_pop = st.slider("Artist Popularity (0–100)", 0, 100, 35)
+    followers = st.number_input("Spotify Followers", min_value=0, value=5000, step=100)
     year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, step=1)
 
 with st.sidebar.expander("Genre", expanded=True):
@@ -327,11 +398,8 @@ with st.sidebar.expander("Genre", expanded=True):
         index=0,
     )
 
-show_debug = st.sidebar.checkbox("Show debug (feature alignment)", value=False)
-
 st.sidebar.markdown("---")
 run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True)
-
 
 # ============================================================
 # Tabs
@@ -339,7 +407,6 @@ run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True
 tab_overview, tab_features, tab_compare, tab_debug = st.tabs(
     ["Overview", "Song Features", "Compare Scenarios", "Debug"]
 )
-
 
 # ============================================================
 # Extract features on upload
@@ -371,7 +438,6 @@ if uploaded_audio is not None:
             st.sidebar.error(f"Audio extraction failed: {e}")
             audio_feats = None
 
-
 # ============================================================
 # Build inputs row
 # ============================================================
@@ -380,7 +446,6 @@ inputs = pd.DataFrame(
         {
             "file": filename,
             "followers": followers,
-            "artist_popularity": artist_pop,
             "year": year,
             "genre": genre,
             "danceability": None if audio_feats is None else audio_feats["danceability"],
@@ -399,61 +464,45 @@ inputs = pd.DataFrame(
     ]
 )
 
-
 # ============================================================
-# Run models
+# Run models (Popularity + Hit + Clustering)
 # ============================================================
 pred_pop = None
-breakout_prob = None
+hit_pct = None
 rec_bucket = None
 rec_text = None
 archetype_out = None
 X_reg = None
-X_gb = None
+X_hit = None
 
 if run:
     if uploaded_audio is None or audio_feats is None:
         st.error("Upload a song (MP3/WAV) first — this version is song-driven.")
     else:
         missing = []
-        if not POP_MODEL_PATH.exists(): missing.append(POP_MODEL_PATH.as_posix())
-        if not HIT_MODEL_PATH.exists(): missing.append(HIT_MODEL_PATH.as_posix())
-        for p in [CLUSTER_SCALER_PATH, KMEANS_PATH, CLUSTER_FEATS_PATH, CLUSTER_LABELS_PATH, CLUSTER_HIT_SUMMARY_PATH]:
+        if not POP_MODEL_PATH.exists():
+            missing.append(POP_MODEL_PATH.as_posix())
+
+        if not HIT_MODEL_PATH.exists():
+            missing.append(HIT_MODEL_PATH.as_posix())
+
+        for p in [
+            CLUSTER_SCALER_PATH,
+            KMEANS_PATH,
+            CLUSTER_FEATS_PATH,
+            CLUSTER_LABELS_PATH,
+            CLUSTER_HIT_SUMMARY_PATH,
+        ]:
             if not p.exists():
                 missing.append(p.as_posix())
+
         if missing:
             st.error("Missing required files:\n- " + "\n- ".join(missing))
             st.stop()
 
         row = inputs.iloc[0]
 
-        # 1) Breakout prob (GB classifier)
-        gb_model = load_gb_hit_model()
-        if not hasattr(gb_model, "feature_names_in_"):
-            st.error("GB model missing feature_names_in_. Re-train with pandas DataFrame to preserve schema.")
-            st.stop()
-
-        gb_expected = gb_model.feature_names_in_.tolist()
-        gb_base = {
-            "danceability": row["danceability"],
-            "energy": row["energy"],
-            "loudness": row["loudness"],
-            "speechiness": row["speechiness"],
-            "acousticness": row["acousticness"],
-            "instrumentalness": row["instrumentalness"],
-            "liveness": row["liveness"],
-            "valence": row["valence"],
-            "tempo": row["tempo"],
-            "duration_ms": row["duration_ms"],
-            "key": row["key"],
-            "mode": row["mode"],
-            "total_artist_followers": row["followers"],
-            "avg_artist_popularity": row["artist_popularity"],
-        }
-        X_gb = pd.DataFrame([gb_base]).reindex(columns=gb_expected)
-        breakout_prob = float(gb_model.predict_proba(X_gb)[:, 1][0])
-
-        # 2) Popularity (regression)
+        # 1) Popularity (regression)
         reg_pipeline = load_regression_pipeline()
         reg_expected = safe_get_feature_names(reg_pipeline)
         if reg_expected is None:
@@ -463,6 +512,19 @@ if run:
         X_reg = build_regression_input(row, reg_expected)
         pred_val = float(reg_pipeline.predict(X_reg)[0])
         pred_pop = float(np.clip(pred_val, 0.0, 100.0))
+
+        # 2) Hit likelihood (classification)
+        hit_pipeline = load_hit_pipeline()
+        X_hit = build_hit_input(row)
+
+        if hasattr(hit_pipeline, "predict_proba"):
+            p = float(hit_pipeline.predict_proba(X_hit)[0, 1])
+        else:
+            # Fallback (should not happen with your saved pipeline)
+            pred = int(hit_pipeline.predict(X_hit)[0])
+            p = float(pred)
+
+        hit_pct = float(np.clip(p * 100.0, 0.0, 100.0))
 
         # 3) Archetype (clustering)
         cluster_inputs = {
@@ -482,9 +544,8 @@ if run:
         except Exception as e:
             archetype_out = ("—", "Archetype unavailable", str(e), pd.DataFrame(), None)
 
-        # 4) Recommendation
-        rec_bucket, rec_text = recommendation_from_models(breakout_prob, pred_pop)
-
+        # 4) Recommendation (combined)
+        rec_bucket, rec_text = recommendation_from_scores(pred_pop, hit_pct)
 
 # ============================================================
 # OVERVIEW TAB
@@ -493,33 +554,21 @@ with tab_overview:
     h1, h2 = st.columns([2.5, 1])
     with h1:
         st.title("BeatForecast")
-        st.markdown('<div class="kicker">INSIGHTS THAT MOVE MUSIC FORWARD</div>', unsafe_allow_html=True)
-        st.markdown('<div class="small-muted">Song upload → audio features → models → recommendation</div>', unsafe_allow_html=True)
-    with h2:
-        st.markdown(
-            """
-            <div class="card">
-              <div class="card-title">Modules</div>
-              <div class="card-sub">Clustering · Hit Prob · Popularity Forecast</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 1, 1.2])
 
-    hit_val = "—" if breakout_prob is None else f"{breakout_prob*100:.1f}%"
     pop_val = "—" if pred_pop is None else f"{pred_pop:.1f}"
+    hit_val = "—" if hit_pct is None else f"{hit_pct:.1f}%"
 
     with c1:
         st.markdown(
             f"""
             <div class="card">
-              <div class="card-title">Hit Likelihood (GB Model)</div>
-              <div class="card-value">{hit_val}</div>
-              <div class="card-sub">Gradient boosting classifier probability</div>
+              <div class="card-title">Predicted Popularity</div>
+              <div class="card-value">{pop_val}</div>
+              <div class="card-sub">Regression pipeline output (0–100)</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -529,9 +578,9 @@ with tab_overview:
         st.markdown(
             f"""
             <div class="card">
-              <div class="card-title">Predicted Popularity</div>
-              <div class="card-value">{pop_val}</div>
-              <div class="card-sub">Regression pipeline output (0–100)</div>
+              <div class="card-title">Hit Likelihood</div>
+              <div class="card-value">{hit_val}</div>
+              <div class="card-sub">Classification probability</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -568,8 +617,8 @@ with tab_overview:
             """
             - Extracts **audio features** from your upload
             - Combines with **artist context** + **genre**
-            - Predicts **hit likelihood** (GB classifier)
             - Predicts **popularity** (regression)
+            - Predicts **hit likelihood** (classification)
             - Assigns a **song archetype** (clustering)
             """.strip()
         )
@@ -590,10 +639,10 @@ with tab_overview:
 
     s1, s2 = st.columns([1, 1])
     with s1:
-        if st.button("Save Current Scenario", use_container_width=True, disabled=(pred_pop is None)):
+        if st.button("Save Current Scenario", use_container_width=True, disabled=(pred_pop is None or hit_pct is None)):
             row2 = inputs.iloc[0].to_dict()
             row2["predicted_popularity"] = None if pred_pop is None else float(pred_pop)
-            row2["hit_likelihood"] = None if breakout_prob is None else float(breakout_prob)
+            row2["predicted_hit_pct"] = None if hit_pct is None else float(hit_pct)
             st.session_state["scenario_bank"].append(row2)
             st.success("Scenario saved.")
     with s2:
@@ -602,7 +651,7 @@ with tab_overview:
             st.success("Cleared.")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-    st.subheader("Song Archetype (Clustering)")
+    st.subheader("Song Archetype")
     if archetype_out is None:
         st.caption("Run forecast to see archetype.")
     else:
@@ -610,7 +659,6 @@ with tab_overview:
         st.write(f"**{archetype}**")
         if archetype_desc:
             st.caption(archetype_desc)
-
 
 # ============================================================
 # FEATURES TAB
@@ -678,7 +726,11 @@ with tab_features:
             }
             st.dataframe(pd.DataFrame([model_inputs_view]), use_container_width=True, hide_index=True)
             st.markdown("### Artist Context")
-            st.dataframe(inputs[["followers", "artist_popularity", "year", "genre"]], use_container_width=True, hide_index=True)
+            st.dataframe(inputs[["followers", "year", "genre"]], use_container_width=True, hide_index=True)
+
+            if hit_pct is not None:
+                st.markdown("### Classification Output")
+                st.write(f"**Hit Likelihood:** {hit_pct:.1f}%")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.subheader("Top Model Drivers (Regression)")
@@ -694,7 +746,6 @@ with tab_features:
             st.bar_chart(fi.head(10).set_index("feature")["importance"])
     else:
         st.caption("Run forecast to see model drivers.")
-
 
 # ============================================================
 # COMPARE TAB
@@ -718,7 +769,6 @@ with tab_compare:
             use_container_width=True,
         )
 
-
 # ============================================================
 # DEBUG TAB
 # ============================================================
@@ -736,16 +786,32 @@ with tab_debug:
 
     with d2:
         st.markdown("### Model input rows")
-        if X_reg is None and X_gb is None:
+        if X_reg is None:
             st.info("Run Forecast to generate model inputs.")
         else:
-            if X_gb is not None:
-                st.markdown("**GB input (X_gb)**")
-                st.dataframe(X_gb, use_container_width=True, hide_index=True)
-            if X_reg is not None:
-                st.markdown("**Regression input (X_reg)**")
-                st.dataframe(X_reg, use_container_width=True, hide_index=True)
+            st.markdown("**Regression input (X_reg)**")
+            st.dataframe(X_reg, use_container_width=True, hide_index=True)
+
+        if X_hit is None:
+            st.info("Run Forecast to generate classification inputs.")
+        else:
+            st.markdown("**Hit model input (X_hit)**")
+            st.dataframe(X_hit, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.markdown("### Inputs used")
     st.dataframe(inputs, use_container_width=True, hide_index=True)
+
+st.markdown(
+    """
+    <div style="
+        background:#1e5f3a;
+        height:14px;
+        width:220px;
+        border-radius:6px;
+        margin-top:6px;
+        margin-bottom:20px;">
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

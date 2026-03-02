@@ -1,86 +1,243 @@
+/* =========================
+   BeatForecast - theme.css
+   Thick green frame + clean sidebar + consistent inputs
+   ========================= */
+
+/* ---------- Brand tokens ---------- */
 :root{
-  --green-900:#0B3D2E;
-  --green-800:#0F5A3F;
-  --green-700:#137A53;
-  --mint-100:#E7F5EE;
-  --mint-050:#F2FBF6;
+  --bf-green: #1f7a4f;
+  --bf-green-2: #2b9a66;
 
-  --text:#0B1F17;
-  --muted:rgba(11,31,23,0.62);
-  --border:rgba(11,31,23,0.12);
-  --shadow:0 10px 24px rgba(0,0,0,0.06);
+  --bf-bg: #f6fbf8;          /* outside canvas */
+  --bf-surface: #ffffff;     /* framed app surface */
+  --bf-sidebar: #eef7f2;
+
+  --bf-border: rgba(31, 122, 79, 0.18);
+  --bf-border-strong: rgba(31, 122, 79, 0.55);
+
+  --bf-text: #102a20;
+  --bf-muted: rgba(16, 42, 32, 0.70);
+
+  --bf-shadow: 0 14px 34px rgba(16, 42, 32, 0.10);
+
+  --bf-radius: 22px;
+  --bf-frame: 6px;           /* thickness of outer green border */
+
+  --bf-info-bg: rgba(31, 122, 79, 0.12);     /* light green */
+  --bf-info-border: rgba(31, 122, 79, 0.20);
 }
 
-.block-container{ max-width: 1120px; padding-top: 1.1rem; }
-[data-testid="stSidebar"]{ border-right: 1px solid var(--border); }
-
-h1,h2,h3{ letter-spacing:-0.02em; }
-.small-muted{ color: var(--muted); font-size: 0.95rem; }
-
-/* Primary button */
-div.stButton > button[kind="primary"]{
-  background: var(--green-800);
-  border: 1px solid rgba(15,90,63,0.35);
-  color: white;
-  border-radius: 14px;
-  padding: 0.65rem 1rem;
-  box-shadow: var(--shadow);
-}
-div.stButton > button[kind="primary"]:hover{ filter: brightness(1.02); }
-
-/* “Report” card */
-.card{
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 16px 16px 14px 16px;
-  background: #fff;
-  box-shadow: var(--shadow);
-}
-.card-title{
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing:0.06em;
-}
-.card-value{ font-size: 34px; font-weight: 850; line-height: 1.05; color: var(--text); }
-.card-sub{ font-size: 12px; color: rgba(11,31,23,0.55); margin-top: 6px; }
-
-/* Recommendation boxes */
-.rec{
-  border-radius: 18px;
-  padding: 16px;
-  border: 1px solid rgba(19,122,83,0.20);
-  box-shadow: var(--shadow);
-}
-.rec.good{ background: rgba(19,122,83,0.12); }
-.rec.mid{ background: rgba(242, 192, 86, 0.16); border-color: rgba(242,192,86,0.35); }
-.rec.low{ background: rgba(220, 53, 69, 0.10); border-color: rgba(220,53,69,0.20); }
-.rec-title{ font-size: 14px; font-weight: 850; margin-bottom: 6px; color: var(--text); }
-.rec-text{ margin: 0; color: rgba(11,31,23,0.78); }
-
-/* Mint chips */
-.chip{
-  display:inline-block;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: var(--mint-100);
-  border: 1px solid rgba(19,122,83,0.18);
-  color: var(--green-900);
-  font-weight: 750;
-  font-size: 12px;
-  margin: 0 8px 8px 0;
+/* ---------- Page background ---------- */
+html, body{
+  background: var(--bf-bg) !important;
 }
 
-/* Divider line */
-.hr{ height: 1px; background: rgba(11,31,23,0.08); margin: 12px 0 14px 0; }
+/* Hide Streamlit chrome */
+div[data-testid="stToolbar"]{ visibility: hidden !important; height: 0 !important; }
+header[data-testid="stHeader"]{
+  background: transparent !important;
+  height: 0 !important;
+  border: none !important;
+}
+#MainMenu{ visibility: hidden; }
+footer{ visibility: hidden; }
 
-/* Make the app background feel more like a report page */
-.main .block-container{
-  background: #fff;
-  border: 1px solid rgba(11,31,23,0.12);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
-  padding: 24px;
+/* ---------- FULL APP FRAME (sidebar + main) ---------- */
+div[data-testid="stAppViewContainer"]{
+  background: var(--bf-bg) !important;
+  padding: 18px !important; /* space between mint bg and frame */
 }
 
+/* Frame the inner wrapper so it wraps sidebar + main */
+div[data-testid="stAppViewContainer"] > div{
+  background: var(--bf-surface) !important;
+  border: var(--bf-frame) solid var(--bf-green) !important;
+  border-radius: var(--bf-radius) !important;
+  box-shadow: var(--bf-shadow) !important;
+  overflow: hidden !important;
+  padding-bottom: 22px !important; /* so you can scroll and still see bottom border */
+}
+
+/* ---------- Sidebar styling (clean, no boxed sections) ---------- */
+section[data-testid="stSidebar"]{
+  background: var(--bf-sidebar) !important;
+  border-right: 1px solid var(--bf-border) !important;
+}
+section[data-testid="stSidebar"] > div{
+  background: transparent !important;
+  padding-top: 10px !important;
+}
+
+/* Remove expander “panel” look */
+section[data-testid="stSidebar"] details{
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+section[data-testid="stSidebar"] details > summary{
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0.25rem 0.25rem !important;
+  color: var(--bf-text) !important;
+  font-weight: 700 !important;
+}
+section[data-testid="stSidebar"] details > div{
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0.25rem 0.25rem 0.75rem 0.25rem !important;
+}
+
+/* Sidebar separators */
+section[data-testid="stSidebar"] hr{
+  border: none !important;
+  height: 1px !important;
+  background: rgba(16, 42, 32, 0.10) !important;
+  margin: 14px 0 !important;
+}
+
+/* Sidebar logo */
+section[data-testid="stSidebar"] img{
+  border-radius: 14px !important;
+}
+
+/* ---------- Main content spacing (ensures bottom frame visible) ---------- */
+[data-testid="stMainBlockContainer"]{
+  max-width: 1200px !important;
+  padding-top: 1.6rem !important;
+  padding-bottom: 3.2rem !important; /* ✅ scroll space before bottom border */
+}
+
+/* ---------- Typography ---------- */
+h1, h2, h3{
+  color: var(--bf-text) !important;
+  letter-spacing: -0.02em;
+}
+h1{ font-weight: 800 !important; }
+
+/* ---------- Buttons ---------- */
+.stButton > button{
+  background: var(--bf-green) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--bf-green) !important;
+  border-radius: 12px !important;
+  padding: 0.55rem 1rem !important;
+  font-weight: 700 !important;
+}
+.stButton > button:hover{
+  background: var(--bf-green-2) !important;
+  border-color: var(--bf-green-2) !important;
+}
+
+/* ---------- Inputs (consistent look) ---------- */
+.stTextInput input,
+.stNumberInput input,
+.stTextArea textarea{
+  border-radius: 12px !important;
+  border: 1px solid rgba(31, 122, 79, 0.16) !important;
+  background: rgba(255,255,255,0.92) !important;
+}
+
+/* Focus */
+.stTextInput input:focus,
+.stNumberInput input:focus,
+.stTextArea textarea:focus{
+  border-color: var(--bf-border-strong) !important;
+  box-shadow: 0 0 0 3px rgba(31, 122, 79, 0.14) !important;
+  outline: none !important;
+}
+
+/* =========================================================
+   ✅ FIX SELECTBOX “PILL” LOOK (BaseWeb select)
+   This targets the internal elements Streamlit uses.
+   ========================================================= */
+
+/* Make the whole select container match other inputs */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"]{
+  width: 100% !important;
+  border-radius: 12px !important;
+  border: 1px solid rgba(31, 122, 79, 0.16) !important;
+  background: rgba(255,255,255,0.92) !important;
+  box-shadow: none !important;
+}
+
+/* The clickable button area inside the select */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div{
+  border-radius: 12px !important;
+  background: transparent !important;
+}
+
+/* The “value” row (where Pop shows) */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] div[role="button"]{
+  min-height: 44px !important;
+  padding: 8px 12px !important;
+  border-radius: 12px !important;
+  background: transparent !important;
+}
+
+/* Remove any inner “pill/tag” styling BaseWeb applies */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="tag"],
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] span[aria-label="selected"]{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* Nuke extra rounded inner containers if present */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] *{
+  box-shadow: none !important;
+}
+
+/* Dropdown arrow */
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] svg{
+  opacity: 0.75 !important;
+}
+
+/* ---------- Tabs ---------- */
+.stTabs [data-baseweb="tab-list"]{
+  gap: 8px !important;
+  border-bottom: 1px solid var(--bf-border) !important;
+}
+.stTabs [data-baseweb="tab"]{
+  border-radius: 12px 12px 0 0 !important;
+  padding: 10px 14px !important;
+}
+.stTabs [aria-selected="true"]{
+  color: var(--bf-green) !important;
+  border-bottom: 3px solid var(--bf-green) !important;
+}
+
+/* ---------- Dataframes ---------- */
+div[data-testid="stDataFrame"]{
+  border: 1px solid var(--bf-border) !important;
+  border-radius: 16px !important;
+  overflow: hidden !important;
+}
+
+/* =========================================================
+   ✅ FIX “Positive signals” INFO BOX (st.info) to light green
+   Streamlit renders alerts with different internal structure by version
+   ========================================================= */
+
+div[data-testid="stAlert"]{
+  border-radius: 14px !important;
+  border: 1px solid var(--bf-info-border) !important;
+  background: var(--bf-info-bg) !important;
+  color: var(--bf-text) !important;
+  box-shadow: none !important;
+}
+
+/* Some versions wrap the alert content in an inner div */
+div[data-testid="stAlert"] > div{
+  background: transparent !important;
+}
+
+/* Links inside */
+div[data-testid="stAlert"] a{
+  color: var(--bf-green) !important;
+  font-weight: 700 !important;
+}
