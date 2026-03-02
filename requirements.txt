@@ -1,15 +1,14 @@
-# Core
 streamlit==1.42.2
 pandas==2.2.2
 numpy==2.0.2
 scikit-learn==1.6.1
 joblib==1.4.2
 
-# Audio feature extraction
 librosa==0.10.2.post1
 soundfile==0.12.1
+audioread==3.1.0
 
-# Common dependencies (stable pins)
 scipy==1.14.1
 numba==0.60.0
 llvmlite==0.43.0
+soxr==1.0.0

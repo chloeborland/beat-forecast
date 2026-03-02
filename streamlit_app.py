@@ -356,7 +356,8 @@ def extract_audio_features(file_bytes: bytes) -> dict:
     duration_ms = int(round(duration_sec * 1000))
 
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    tempo = float(tempo) if np.isfinite(tempo) else 120.0
+    tempo_val = np.atleast_1d(tempo)[0]
+    tempo = float(tempo_val) if np.isfinite(tempo_val) else 120.0
     tempo = float(np.clip(tempo, 40.0, 220.0))
 
     rms = librosa.feature.rms(y=y)[0]
