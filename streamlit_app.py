@@ -829,4 +829,3 @@ with tab_compare:
             mime="text/csv",
             use_container_width=True,
         )
-
