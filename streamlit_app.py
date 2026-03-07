@@ -1,5 +1,6 @@
 import io
 import json
+import warnings
 import joblib
 import numpy as np
 import pandas as pd
@@ -14,6 +15,14 @@ st.set_page_config(
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# ============================================================
+# Silence noisy (harmless) sklearn warning
+# ============================================================
+warnings.filterwarnings(
+    "ignore",
+    message="X has feature names, but StandardScaler was fitted without feature names",
 )
 
 # ============================================================
@@ -56,16 +65,25 @@ MODELS_DIR = BASE_DIR / "models"
 POP_MODEL_PATH = MODELS_DIR / "pop_rf_pipeline.joblib"
 
 # Classification (hit likelihood)
-# NOTE: using the compat model you created in Colab
-HIT_MODEL_PATH = BASE_DIR / "hit_gb_pipeline_wade_compat.joblib"
+# Prefer models/ path; fallback to repo root if needed
+HIT_MODEL_PATH_PRIMARY = MODELS_DIR / "hit_gb_pipeline_wade_compat.joblib"
+HIT_MODEL_PATH_FALLBACK = BASE_DIR / "hit_gb_pipeline_wade_compat.joblib"
+HIT_MODEL_PATH = HIT_MODEL_PATH_PRIMARY if HIT_MODEL_PATH_PRIMARY.exists() else HIT_MODEL_PATH_FALLBACK
 
-# Clustering assets
+# Clustering assets (repo root)
 CLUSTER_SCALER_PATH = BASE_DIR / "cluster_scaler.pkl"
 KMEANS_PATH = BASE_DIR / "kmeans_k6.pkl"
 CLUSTER_FEATS_PATH = BASE_DIR / "cluster_feature_list.json"
 CLUSTER_LABELS_PATH = BASE_DIR / "cluster_labels.csv"
 CLUSTER_HIT_SUMMARY_PATH = BASE_DIR / "cluster_hit_summary.csv"
 CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
+
+# ============================================================
+# Interpretation constants (NO model changes)
+# ============================================================
+BASE_HIT_RATE = 0.00224          # 0.224% baseline
+DOC_THRESHOLD_T = 0.20           # report-aligned threshold
+
 
 # ============================================================
 # Cached loaders
@@ -130,7 +148,6 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 def predict_archetype(user_inputs: dict):
     """
     Robust archetype lookup that won't crash if cluster_labels.csv has different column names.
-    Fixes the 'name' KeyError by discovering suitable columns.
     """
     scaler, kmeans, feats, labels, hit_summary, top2024 = load_clustering_assets()
 
@@ -138,19 +155,16 @@ def predict_archetype(user_inputs: dict):
     Xs = scaler.transform(X)
     cid = int(kmeans.predict(Xs)[0])
 
-    # Find cluster key column in labels (default 'cluster')
     cluster_col = pick_col(labels, ["cluster", "cluster_id", "clusterId", "k", "label"])
     if cluster_col is None:
-        # Fallback: if no cluster column exists, just return numeric id without label
         name = f"Cluster {cid}"
         desc = ""
-        hs = hit_summary[hit_summary.get("cluster", pd.Series(dtype=int)) == cid].head(1)
-        t24 = None
-        return cid, name, desc, hs, t24
+        hs_cluster_col = pick_col(hit_summary, ["cluster", "cluster_id", "clusterId"])
+        hs = hit_summary[hit_summary[hs_cluster_col] == cid].head(1) if hs_cluster_col else hit_summary.head(0)
+        return cid, name, desc, hs, None
 
     lab = labels[labels[cluster_col] == cid].head(1)
 
-    # Pick a name/description column if present; otherwise use safe fallbacks
     name_col = pick_col(labels, ["name", "archetype", "cluster_name", "label_name", "title"])
     desc_col = pick_col(labels, ["description", "desc", "summary", "details"])
 
@@ -161,11 +175,9 @@ def predict_archetype(user_inputs: dict):
         name = f"Cluster {cid}"
         desc = ""
 
-    # hit_summary is expected to have 'cluster'
     hs_cluster_col = pick_col(hit_summary, ["cluster", "cluster_id", "clusterId"])
     hs = hit_summary[hit_summary[hs_cluster_col] == cid].head(1) if hs_cluster_col else hit_summary.head(0)
 
-    # top2024 may have either 'name' or the same name column
     t24 = None
     if top2024 is not None:
         t24_name_col = pick_col(top2024, ["name", "archetype", "cluster_name", "label_name", "title"])
@@ -177,40 +189,75 @@ def predict_archetype(user_inputs: dict):
 
 def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
     """
-    Generic feature alignment for both regression + classification pipelines.
-    Fills missing columns with 0, maps app inputs into whatever the model expects.
+    Align app inputs to whatever the model expects, without retraining.
+    Fix: expanded follower/year mappings (raw + log + age + extra names).
     """
     X = pd.DataFrame([{c: 0 for c in expected_cols}])
 
-    # Artist context mappings (support multiple possible training column names)
     followers_val = row.get("followers")
     year_val = row.get("year")
 
-    follower_targets = [
-        "total_artist_followers",
-        "spotify_followers",
-        "followers",
-        "artist_followers",
-    ]
-    year_targets = ["year", "release_year"]
-
+    # ----------------------------
+    # FOLLOWERS (raw + log variants)
+    # ----------------------------
     if followers_val is not None:
+        f = float(followers_val)
+
+        follower_targets = [
+            "total_artist_followers",
+            "spotify_followers",
+            "followers",
+            "artist_followers",
+            "artist_followers_total",
+            "artist_followers_count",
+            "artist_total_followers",
+            "total_followers",
+            "followers_total",
+            "total_artist_followers_count",
+            "total_followers_count",
+            "artist_followers_total_count",
+        ]
         for col in follower_targets:
             if col in expected_cols:
-                X.loc[0, col] = float(followers_val)
+                X.loc[0, col] = f
 
-    if year_val is not None:
-        for col in year_targets:
+        flog = float(np.log1p(max(f, 0.0)))
+        follower_log_targets = [
+            "log_followers",
+            "log_artist_followers",
+            "followers_log",
+            "ln_followers",
+            "log_total_artist_followers",
+            "log_spotify_followers",
+            "log_artist_followers_total",
+            "log_followers_total",
+            "artist_followers_log",
+            "artist_followers_ln",
+        ]
+        for col in follower_log_targets:
             if col in expected_cols:
-                X.loc[0, col] = float(year_val)
+                X.loc[0, col] = flog
 
-    # If your regression training expected artist popularity, keep this safe (won't set if missing)
-    if "avg_artist_popularity" in expected_cols:
-        # If you don't have artist_popularity in the UI, it stays 0
-        if row.get("artist_popularity") is not None:
-            X.loc[0, "avg_artist_popularity"] = float(row["artist_popularity"])
+    # ----------------------------
+    # YEAR (raw + derived variants)
+    # ----------------------------
+    if year_val is not None:
+        y = float(year_val)
 
-    # Audio feature mapping
+        for col in ["year", "release_year"]:
+            if col in expected_cols:
+                X.loc[0, col] = y
+
+        current_year = float(pd.Timestamp.now().year)
+        age = max(0.0, current_year - y)
+
+        for col in ["years_since_release", "song_age_years", "track_age_years", "age_years"]:
+            if col in expected_cols:
+                X.loc[0, col] = age
+
+    # ----------------------------
+    # AUDIO FEATURES
+    # ----------------------------
     direct_map = {
         "danceability": ["danceability"],
         "energy": ["energy"],
@@ -221,7 +268,7 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
         "acousticness": ["acousticness"],
         "instrumentalness": ["instrumentalness"],
         "liveness": ["liveness"],
-        "duration_ms": ["duration_ms", "duration_ms_rounded", "duration"],
+        "duration_ms": ["duration_ms", "duration_ms_rounded", "duration", "track_duration_ms"],
         "key": ["key"],
         "mode": ["mode"],
     }
@@ -233,13 +280,12 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
             if mk in expected_cols:
                 X.loc[0, mk] = float(row[app_k])
 
-    # Optional genre one-hot (common pattern: genre_Pop etc.)
+    # ----------------------------
+    # GENRE one-hot mapping
+    # ----------------------------
     if "genre" in row.index and row.get("genre") is not None:
         g = str(row["genre"]).strip()
-        possible = [
-            f"genre_{g}",
-            f"primary_genre_{g}",
-        ]
+        possible = [f"genre_{g}", f"primary_genre_{g}", f"genre__{g}"]
         for gc in possible:
             if gc in expected_cols:
                 X.loc[0, gc] = 1
@@ -247,41 +293,75 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
     return X[expected_cols]
 
 
-def recommendation_from_outputs(pred_pop: float | None, p_hit: float | None) -> tuple[str, str]:
+def safe_predict_hit_probability(hit_pipeline, X_hit: pd.DataFrame) -> float:
     """
-    Uses both outputs when available. Conservative and demo-friendly.
+    Robustly compute p(hit)=P(y=1) using correct proba column based on classes_.
+    (Prevents incorrect 0.5% vs 87% flips due to class ordering.)
     """
-    if pred_pop is None and p_hit is None:
-        return "low", "Upload a song and click Run Forecast to generate results."
+    if hasattr(hit_pipeline, "predict_proba"):
+        proba = hit_pipeline.predict_proba(X_hit)
 
-    # If only one exists, fall back gracefully
-    pop_score = 0.0 if pred_pop is None else float(pred_pop)
-    hit_score = 0.0 if p_hit is None else float(p_hit) * 100.0  # 0..100 scale
+        classes = getattr(hit_pipeline, "classes_", None)
+        if classes is None and hasattr(hit_pipeline, "named_steps"):
+            last = list(hit_pipeline.named_steps.values())[-1]
+            classes = getattr(last, "classes_", None)
 
-    # Simple blend for narrative (not changing model outputs, just decision rule)
-    combined = 0.65 * pop_score + 0.35 * hit_score
+        if classes is not None:
+            classes = list(classes)
+            if 1 in classes:
+                idx = classes.index(1)
+                return float(proba[0, idx])
 
-    if combined >= 55:
-        return "good", "Strong outlook. Consider greenlighting release and promotion."
-    if combined >= 30:
-        return "mid", "Moderate outlook. Consider targeted marketing and minor refinements."
-    return "low", "Cautious outlook. Consider revising production/positioning before investing heavily."
+        # fallback only if we can't find classes_
+        return float(proba[0, 1])
+
+    if hasattr(hit_pipeline, "decision_function"):
+        score = float(hit_pipeline.decision_function(X_hit)[0])
+        return float(1.0 / (1.0 + np.exp(-score)))
+
+    pred = int(hit_pipeline.predict(X_hit)[0])
+    return 1.0 if pred == 1 else 0.0
 
 
 def hit_signal_tier(p_hit: float | None) -> tuple[str, str]:
-    """
-    Interpretation layer (does NOT change model probability).
-    p_hit is 0..1
-    """
     if p_hit is None:
         return "na", "—"
-    if p_hit >= 0.20:
+    if p_hit >= DOC_THRESHOLD_T:
         return "strong", "Strong"
     if p_hit >= 0.08:
         return "promising", "Promising"
     if p_hit >= 0.02:
         return "emerging", "Emerging"
     return "low", "Low"
+
+
+def lift_vs_baseline(p_hit: float | None, baseline: float = BASE_HIT_RATE) -> float | None:
+    if p_hit is None:
+        return None
+    b = float(baseline) if baseline and baseline > 0 else 1e-9
+    return float(p_hit) / b
+
+
+def recommendation_from_outputs(pred_pop: float | None, p_hit: float | None) -> tuple[str, str]:
+    if pred_pop is None and p_hit is None:
+        return "low", "Upload a song and click Run Forecast to generate results."
+
+    tier_key, _ = hit_signal_tier(p_hit)
+    lift = lift_vs_baseline(p_hit)
+
+    if p_hit is not None and tier_key == "strong":
+        return "good", "Strong breakout signal. Consider greenlighting release and promotion."
+
+    if lift is not None and lift >= 10:
+        return "good", "Above-average breakout signal versus baseline. Consider a focused release + targeted marketing test."
+
+    if pred_pop is not None and float(pred_pop) >= 65:
+        return "mid", "High expected popularity. Consider release with disciplined marketing and monitor early performance."
+
+    if lift is not None and lift >= 4:
+        return "mid", "Moderate breakout signal versus baseline. Consider refining and running a small-scale rollout."
+
+    return "low", "Cautious outlook. Consider revising production/positioning before investing heavily."
 
 
 def score_badges(audio_feats: dict) -> list[str]:
@@ -423,7 +503,7 @@ if "scenario_bank" not in st.session_state:
 
 
 # ============================================================
-# Sidebar (song-driven)
+# Sidebar
 # ============================================================
 st.sidebar.markdown("## Inputs")
 st.sidebar.caption("Upload a song, set artist context + genre, then run.")
@@ -510,18 +590,17 @@ inputs = pd.DataFrame(
 )
 
 # ============================================================
-# Run models (Popularity + Hit + Clustering)
+# Run models
 # ============================================================
 pred_pop = None
 p_hit = None
-hit_tier_key = None
+hit_lift = None
 hit_tier_label = None
 
 rec_bucket = None
 rec_text = None
 
 archetype_out = None
-
 X_reg = None
 X_hit = None
 
@@ -530,14 +609,12 @@ if run:
         st.error("Upload a song (MP3/WAV) first — this version is song-driven.")
     else:
         missing = []
-        # regression
+
         if not POP_MODEL_PATH.exists():
             missing.append(POP_MODEL_PATH.as_posix())
-        # hit
         if not HIT_MODEL_PATH.exists():
             missing.append(HIT_MODEL_PATH.as_posix())
 
-        # clustering
         for p in [
             CLUSTER_SCALER_PATH,
             KMEANS_PATH,
@@ -554,7 +631,7 @@ if run:
 
         row = inputs.iloc[0]
 
-        # 1) Popularity (regression)
+        # Regression
         reg_pipeline = load_regression_pipeline()
         reg_expected = safe_get_feature_names(reg_pipeline)
         if reg_expected is None:
@@ -562,10 +639,9 @@ if run:
             st.stop()
 
         X_reg = build_aligned_input(row, reg_expected)
-        pred_val = float(reg_pipeline.predict(X_reg)[0])
-        pred_pop = float(np.clip(pred_val, 0.0, 100.0))
+        pred_pop = float(np.clip(float(reg_pipeline.predict(X_reg)[0]), 0.0, 100.0))
 
-        # 2) Hit likelihood (classification)
+        # Classification
         hit_pipeline = load_hit_pipeline()
         hit_expected = safe_get_feature_names(hit_pipeline)
         if hit_expected is None:
@@ -573,23 +649,11 @@ if run:
             st.stop()
 
         X_hit = build_aligned_input(row, hit_expected)
+        p_hit = safe_predict_hit_probability(hit_pipeline, X_hit)
+        hit_lift = lift_vs_baseline(p_hit)
+        _, hit_tier_label = hit_signal_tier(p_hit)
 
-        # Predict proba robustly
-        if hasattr(hit_pipeline, "predict_proba"):
-            proba = hit_pipeline.predict_proba(X_hit)
-            p_hit = float(proba[0, 1])
-        else:
-            # fallback: decision_function -> sigmoid-ish mapping (rare case)
-            if hasattr(hit_pipeline, "decision_function"):
-                score = float(hit_pipeline.decision_function(X_hit)[0])
-                p_hit = float(1.0 / (1.0 + np.exp(-score)))
-            else:
-                pred = int(hit_pipeline.predict(X_hit)[0])
-                p_hit = 1.0 if pred == 1 else 0.0
-
-        hit_tier_key, hit_tier_label = hit_signal_tier(p_hit)
-
-        # 3) Archetype (clustering)
+        # Clustering
         cluster_inputs = {
             "danceability": row["danceability"],
             "energy": row["energy"],
@@ -608,8 +672,9 @@ if run:
             archetype_out = None
             st.warning(f"Archetype unavailable: {e}")
 
-        # 4) Recommendation (uses both outputs)
+        # Recommendation
         rec_bucket, rec_text = recommendation_from_outputs(pred_pop, p_hit)
+
 
 # ============================================================
 # OVERVIEW TAB
@@ -621,7 +686,9 @@ with tab_overview:
     c1, c2, c3 = st.columns([1, 1, 1.2])
 
     pop_val = "—" if pred_pop is None else f"{pred_pop:.1f}"
-    hit_val = "—" if p_hit is None else f"{100.0 * float(p_hit):.1f}%"
+    hit_pct = "—" if p_hit is None else f"{100.0 * float(p_hit):.2f}%"
+    lift_val = "—" if hit_lift is None else f"{hit_lift:.1f}×"
+    baseline_txt = f"{100.0 * BASE_HIT_RATE:.3f}%"
     hit_signal = "—" if hit_tier_label is None else hit_tier_label
 
     with c1:
@@ -641,9 +708,11 @@ with tab_overview:
             f"""
             <div class="card">
               <div class="card-title">Hit Likelihood</div>
-              <div class="card-value">{hit_val}</div>
-              <div class="card-sub">Classification probability</div>
-              <div class="card-sub"><b>Hit Signal:</b> {hit_signal}</div>
+              <div class="card-value">{hit_pct}</div>
+              <div class="card-sub">Model probability (hits are rare)</div>
+              <div class="card-sub"><b>Baseline hit rate:</b> {baseline_txt}</div>
+              <div class="card-sub"><b>Lift vs baseline:</b> {lift_val}</div>
+              <div class="card-sub"><b>Hit Signal:</b> {hit_signal} (t={DOC_THRESHOLD_T:.2f})</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -706,6 +775,7 @@ with tab_overview:
             row2 = inputs.iloc[0].to_dict()
             row2["predicted_popularity"] = None if pred_pop is None else float(pred_pop)
             row2["hit_probability"] = None if p_hit is None else float(p_hit)
+            row2["hit_lift_vs_baseline"] = None if hit_lift is None else float(hit_lift)
             row2["hit_signal"] = hit_tier_label
             st.session_state["scenario_bank"].append(row2)
             st.success("Scenario saved.")
@@ -802,7 +872,10 @@ with tab_features:
         if importances is None or reg_expected is None:
             st.caption("Feature importance unavailable for this model.")
         else:
-            fi = pd.DataFrame({"feature": reg_expected, "importance": importances}).sort_values("importance", ascending=False)
+            fi = (
+                pd.DataFrame({"feature": reg_expected, "importance": importances})
+                .sort_values("importance", ascending=False)
+            )
             st.dataframe(fi.head(10), use_container_width=True, hide_index=True)
             st.bar_chart(fi.head(10).set_index("feature")["importance"])
     else:
