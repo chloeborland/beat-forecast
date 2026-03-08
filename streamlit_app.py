@@ -68,7 +68,9 @@ POP_MODEL_PATH = MODELS_DIR / "pop_rf_pipeline.joblib"
 # Prefer models/ path; fallback to repo root if needed
 HIT_MODEL_PATH_PRIMARY = MODELS_DIR / "hit_gb_pipeline_wade_compat.joblib"
 HIT_MODEL_PATH_FALLBACK = BASE_DIR / "hit_gb_pipeline_wade_compat.joblib"
-HIT_MODEL_PATH = HIT_MODEL_PATH_PRIMARY if HIT_MODEL_PATH_PRIMARY.exists() else HIT_MODEL_PATH_FALLBACK
+HIT_MODEL_PATH = (
+    HIT_MODEL_PATH_PRIMARY if HIT_MODEL_PATH_PRIMARY.exists() else HIT_MODEL_PATH_FALLBACK
+)
 
 # Clustering assets (repo root)
 CLUSTER_SCALER_PATH = BASE_DIR / "cluster_scaler.pkl"
@@ -81,8 +83,8 @@ CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
 # ============================================================
 # Interpretation constants (NO model changes)
 # ============================================================
-BASE_HIT_RATE = 0.00224          # 0.224% baseline
-DOC_THRESHOLD_T = 0.20           # report-aligned threshold
+BASE_HIT_RATE = 0.00224   # 0.224% baseline
+DOC_THRESHOLD_T = 0.20    # report-aligned threshold
 
 
 # ============================================================
@@ -145,6 +147,23 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
+def estimate_artist_popularity(followers: float) -> float:
+    """
+    Estimate Spotify-style artist popularity (0-100) from follower count.
+    This keeps the UI simple while providing the regression model with
+    the artist popularity feature it appears to expect.
+
+    Rough mapping:
+    - 1,000 followers  -> ~10
+    - 10,000 followers -> ~26
+    - 1,000,000        -> ~58
+    - 50,000,000       -> ~85
+    """
+    followers = max(float(followers), 1.0)
+    popularity = np.interp(np.log10(followers), [3.0, 8.0], [10.0, 90.0])
+    return float(np.clip(popularity, 0.0, 100.0))
+
+
 def predict_archetype(user_inputs: dict):
     """
     Robust archetype lookup that won't crash if cluster_labels.csv has different column names.
@@ -190,12 +209,17 @@ def predict_archetype(user_inputs: dict):
 def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
     """
     Align app inputs to whatever the model expects, without retraining.
-    Fix: expanded follower/year mappings (raw + log + age + extra names).
+
+    IMPORTANT FIX:
+    - now injects estimated artist popularity from followers
+    - supports raw + log variants for followers and popularity
+    - keeps existing year/audio/genre mapping
     """
     X = pd.DataFrame([{c: 0 for c in expected_cols}])
 
     followers_val = row.get("followers")
     year_val = row.get("year")
+    est_artist_popularity = row.get("estimated_artist_popularity")
 
     # ----------------------------
     # FOLLOWERS (raw + log variants)
@@ -237,6 +261,36 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
         for col in follower_log_targets:
             if col in expected_cols:
                 X.loc[0, col] = flog
+
+    # ----------------------------
+    # ESTIMATED ARTIST POPULARITY
+    # ----------------------------
+    if est_artist_popularity is not None:
+        ap = float(est_artist_popularity)
+
+        popularity_targets = [
+            "avg_artist_popularity",
+            "artist_popularity",
+            "spotify_artist_popularity",
+            "avg_popularity",
+            "mean_artist_popularity",
+            "artist_popularity_avg",
+            "average_artist_popularity",
+        ]
+        for col in popularity_targets:
+            if col in expected_cols:
+                X.loc[0, col] = ap
+
+        popularity_log_targets = [
+            "log_artist_popularity",
+            "artist_popularity_log",
+            "ln_artist_popularity",
+            "log_avg_artist_popularity",
+        ]
+        aplog = float(np.log1p(max(ap, 0.0)))
+        for col in popularity_log_targets:
+            if col in expected_cols:
+                X.loc[0, col] = aplog
 
     # ----------------------------
     # YEAR (raw + derived variants)
@@ -285,7 +339,14 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
     # ----------------------------
     if "genre" in row.index and row.get("genre") is not None:
         g = str(row["genre"]).strip()
-        possible = [f"genre_{g}", f"primary_genre_{g}", f"genre__{g}"]
+        possible = [
+            f"genre_{g}",
+            f"primary_genre_{g}",
+            f"genre__{g}",
+            f"genre_{g.lower()}",
+            f"primary_genre_{g.lower()}",
+            f"genre__{g.lower()}",
+        ]
         for gc in possible:
             if gc in expected_cols:
                 X.loc[0, gc] = 1
@@ -296,7 +357,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
 def safe_predict_hit_probability(hit_pipeline, X_hit: pd.DataFrame) -> float:
     """
     Robustly compute p(hit)=P(y=1) using correct proba column based on classes_.
-    (Prevents incorrect 0.5% vs 87% flips due to class ordering.)
     """
     if hasattr(hit_pipeline, "predict_proba"):
         proba = hit_pipeline.predict_proba(X_hit)
@@ -312,7 +372,6 @@ def safe_predict_hit_probability(hit_pipeline, X_hit: pd.DataFrame) -> float:
                 idx = classes.index(1)
                 return float(proba[0, idx])
 
-        # fallback only if we can't find classes_
         return float(proba[0, 1])
 
     if hasattr(hit_pipeline, "decision_function"):
@@ -523,6 +582,9 @@ with st.sidebar.expander("Genre", expanded=True):
         index=0,
     )
 
+estimated_artist_popularity = estimate_artist_popularity(followers)
+
+
 st.sidebar.markdown("---")
 run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True)
 
@@ -571,6 +633,7 @@ inputs = pd.DataFrame(
         {
             "file": filename,
             "followers": followers,
+            "estimated_artist_popularity": estimated_artist_popularity,
             "year": year,
             "genre": genre,
             "danceability": None if audio_feats is None else audio_feats["danceability"],
@@ -749,6 +812,7 @@ with tab_overview:
             """
             - Extracts **audio features** from your upload
             - Combines with **artist context** + **genre**
+            - Estimates **artist popularity** from followers
             - Predicts **popularity** (regression)
             - Predicts **hit likelihood** (classification)
             - Assigns a **song archetype** (clustering)
@@ -860,8 +924,14 @@ with tab_features:
                 "mode": audio_feats["mode"],
             }
             st.dataframe(pd.DataFrame([model_inputs_view]), use_container_width=True, hide_index=True)
+
             st.markdown("### Artist Context")
-            st.dataframe(inputs[["followers", "year", "genre"]], use_container_width=True, hide_index=True)
+            artist_context_view = inputs[["followers", "estimated_artist_popularity", "year", "genre"]].copy()
+            artist_context_view.rename(
+                columns={"estimated_artist_popularity": "artist_popularity_est"},
+                inplace=True,
+            )
+            st.dataframe(artist_context_view, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.subheader("Top Model Drivers (Regression)")
