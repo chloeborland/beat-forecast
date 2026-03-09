@@ -42,7 +42,7 @@ def load_css(rel_path: str):
 
 load_css("assets/theme.css")
 
-# Optional sidebar logo (won’t crash if missing)
+# Optional sidebar logo
 logo_path = BASE_DIR / "assets" / "logo.png"
 if logo_path.exists():
     st.sidebar.image(str(logo_path), width=220)
@@ -61,18 +61,14 @@ except Exception:
 # ============================================================
 MODELS_DIR = BASE_DIR / "models"
 
-# Regression (popularity)
 POP_MODEL_PATH = MODELS_DIR / "pop_rf_pipeline.joblib"
 
-# Classification (hit likelihood)
-# Prefer models/ path; fallback to repo root if needed
 HIT_MODEL_PATH_PRIMARY = MODELS_DIR / "hit_gb_pipeline_wade_compat.joblib"
 HIT_MODEL_PATH_FALLBACK = BASE_DIR / "hit_gb_pipeline_wade_compat.joblib"
 HIT_MODEL_PATH = (
     HIT_MODEL_PATH_PRIMARY if HIT_MODEL_PATH_PRIMARY.exists() else HIT_MODEL_PATH_FALLBACK
 )
 
-# Clustering assets (repo root)
 CLUSTER_SCALER_PATH = BASE_DIR / "cluster_scaler.pkl"
 KMEANS_PATH = BASE_DIR / "kmeans_k6.pkl"
 CLUSTER_FEATS_PATH = BASE_DIR / "cluster_feature_list.json"
@@ -81,11 +77,10 @@ CLUSTER_HIT_SUMMARY_PATH = BASE_DIR / "cluster_hit_summary.csv"
 CLUSTER_TOP2024_PATH = BASE_DIR / "cluster_top2024_lift.csv"
 
 # ============================================================
-# Interpretation constants (NO model changes)
+# Interpretation constants
 # ============================================================
-BASE_HIT_RATE = 0.00224   # 0.224% baseline
-DOC_THRESHOLD_T = 0.20    # report-aligned threshold
-
+BASE_HIT_RATE = 0.00224
+DOC_THRESHOLD_T = 0.20
 
 # ============================================================
 # Cached loaders
@@ -97,13 +92,17 @@ def load_regression_pipeline():
 
 @st.cache_resource
 def load_hit_pipeline():
-    return joblib.load(HIT_MODEL_PATH.as_posix())
+    try:
+        return joblib.load(HIT_MODEL_PATH.as_posix())
+    except Exception as e:
+        return {"load_error": str(e)}
 
 
 @st.cache_resource
 def load_clustering_assets():
     scaler = joblib.load(CLUSTER_SCALER_PATH.as_posix())
     kmeans = joblib.load(KMEANS_PATH.as_posix())
+
     with open(CLUSTER_FEATS_PATH.as_posix(), "r") as f:
         feats = json.load(f)
 
@@ -148,26 +147,12 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 
 def estimate_artist_popularity(followers: float) -> float:
-    """
-    Estimate Spotify-style artist popularity (0-100) from follower count.
-    This keeps the UI simple while providing the regression model with
-    the artist popularity feature it appears to expect.
-
-    Rough mapping:
-    - 1,000 followers  -> ~10
-    - 10,000 followers -> ~26
-    - 1,000,000        -> ~58
-    - 50,000,000       -> ~85
-    """
     followers = max(float(followers), 1.0)
     popularity = np.interp(np.log10(followers), [3.0, 8.0], [10.0, 90.0])
     return float(np.clip(popularity, 0.0, 100.0))
 
 
 def predict_archetype(user_inputs: dict):
-    """
-    Robust archetype lookup that won't crash if cluster_labels.csv has different column names.
-    """
     scaler, kmeans, feats, labels, hit_summary, top2024 = load_clustering_assets()
 
     X = pd.DataFrame([{f: user_inputs.get(f) for f in feats}]).reindex(columns=feats)
@@ -207,23 +192,12 @@ def predict_archetype(user_inputs: dict):
 
 
 def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFrame:
-    """
-    Align app inputs to whatever the model expects, without retraining.
-
-    IMPORTANT FIX:
-    - now injects estimated artist popularity from followers
-    - supports raw + log variants for followers and popularity
-    - keeps existing year/audio/genre mapping
-    """
     X = pd.DataFrame([{c: 0 for c in expected_cols}])
 
     followers_val = row.get("followers")
     year_val = row.get("year")
     est_artist_popularity = row.get("estimated_artist_popularity")
 
-    # ----------------------------
-    # FOLLOWERS (raw + log variants)
-    # ----------------------------
     if followers_val is not None:
         f = float(followers_val)
 
@@ -262,9 +236,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
             if col in expected_cols:
                 X.loc[0, col] = flog
 
-    # ----------------------------
-    # ESTIMATED ARTIST POPULARITY
-    # ----------------------------
     if est_artist_popularity is not None:
         ap = float(est_artist_popularity)
 
@@ -292,9 +263,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
             if col in expected_cols:
                 X.loc[0, col] = aplog
 
-    # ----------------------------
-    # YEAR (raw + derived variants)
-    # ----------------------------
     if year_val is not None:
         y = float(year_val)
 
@@ -309,9 +277,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
             if col in expected_cols:
                 X.loc[0, col] = age
 
-    # ----------------------------
-    # AUDIO FEATURES
-    # ----------------------------
     direct_map = {
         "danceability": ["danceability"],
         "energy": ["energy"],
@@ -334,9 +299,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
             if mk in expected_cols:
                 X.loc[0, mk] = float(row[app_k])
 
-    # ----------------------------
-    # GENRE one-hot mapping
-    # ----------------------------
     if "genre" in row.index and row.get("genre") is not None:
         g = str(row["genre"]).strip()
         possible = [
@@ -355,9 +317,6 @@ def build_aligned_input(row: pd.Series, expected_cols: list[str]) -> pd.DataFram
 
 
 def safe_predict_hit_probability(hit_pipeline, X_hit: pd.DataFrame) -> float:
-    """
-    Robustly compute p(hit)=P(y=1) using correct proba column based on classes_.
-    """
     if hasattr(hit_pipeline, "predict_proba"):
         proba = hit_pipeline.predict_proba(X_hit)
 
@@ -419,6 +378,9 @@ def recommendation_from_outputs(pred_pop: float | None, p_hit: float | None) -> 
 
     if lift is not None and lift >= 4:
         return "mid", "Moderate breakout signal versus baseline. Consider refining and running a small-scale rollout."
+
+    if pred_pop is not None and float(pred_pop) >= 25:
+        return "mid", "Moderate expected popularity. Consider testing this track against alternatives before full release."
 
     return "low", "Cautious outlook. Consider revising production/positioning before investing heavily."
 
@@ -560,7 +522,6 @@ def extract_audio_features(file_bytes: bytes) -> dict:
 if "scenario_bank" not in st.session_state:
     st.session_state["scenario_bank"] = []
 
-
 # ============================================================
 # Sidebar
 # ============================================================
@@ -583,7 +544,6 @@ with st.sidebar.expander("Genre", expanded=True):
     )
 
 estimated_artist_popularity = estimate_artist_popularity(followers)
-
 
 st.sidebar.markdown("---")
 run = st.sidebar.button("Run Forecast", type="primary", use_container_width=True)
@@ -675,8 +635,6 @@ if run:
 
         if not POP_MODEL_PATH.exists():
             missing.append(POP_MODEL_PATH.as_posix())
-        if not HIT_MODEL_PATH.exists():
-            missing.append(HIT_MODEL_PATH.as_posix())
 
         for p in [
             CLUSTER_SCALER_PATH,
@@ -704,17 +662,26 @@ if run:
         X_reg = build_aligned_input(row, reg_expected)
         pred_pop = float(np.clip(float(reg_pipeline.predict(X_reg)[0]), 0.0, 100.0))
 
-        # Classification
+        # Classification with production fallback
         hit_pipeline = load_hit_pipeline()
-        hit_expected = safe_get_feature_names(hit_pipeline)
-        if hit_expected is None:
-            st.error("Hit pipeline missing feature schema (feature_names_in_).")
-            st.stop()
 
-        X_hit = build_aligned_input(row, hit_expected)
-        p_hit = safe_predict_hit_probability(hit_pipeline, X_hit)
-        hit_lift = lift_vs_baseline(p_hit)
-        _, hit_tier_label = hit_signal_tier(p_hit)
+        if isinstance(hit_pipeline, dict) and "load_error" in hit_pipeline:
+            st.warning("Hit likelihood is temporarily unavailable in production due to model compatibility.")
+            p_hit = None
+            hit_lift = None
+            hit_tier_label = None
+        else:
+            hit_expected = safe_get_feature_names(hit_pipeline)
+            if hit_expected is None:
+                st.warning("Hit pipeline schema unavailable.")
+                p_hit = None
+                hit_lift = None
+                hit_tier_label = None
+            else:
+                X_hit = build_aligned_input(row, hit_expected)
+                p_hit = safe_predict_hit_probability(hit_pipeline, X_hit)
+                hit_lift = lift_vs_baseline(p_hit)
+                _, hit_tier_label = hit_signal_tier(p_hit)
 
         # Clustering
         cluster_inputs = {
@@ -737,7 +704,6 @@ if run:
 
         # Recommendation
         rec_bucket, rec_text = recommendation_from_outputs(pred_pop, p_hit)
-
 
 # ============================================================
 # OVERVIEW TAB
@@ -806,6 +772,7 @@ with tab_overview:
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     left, right = st.columns([1.2, 0.8])
+
     with left:
         st.subheader("What this app does")
         st.markdown(
@@ -834,6 +801,7 @@ with tab_overview:
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     s1, s2 = st.columns([1, 1])
+
     with s1:
         if st.button("Save Current Scenario", use_container_width=True, disabled=(pred_pop is None and p_hit is None)):
             row2 = inputs.iloc[0].to_dict()
@@ -843,6 +811,7 @@ with tab_overview:
             row2["hit_signal"] = hit_tier_label
             st.session_state["scenario_bank"].append(row2)
             st.success("Scenario saved.")
+
     with s2:
         if st.button("Clear Saved Scenarios", use_container_width=True):
             st.session_state["scenario_bank"] = []
@@ -864,12 +833,14 @@ with tab_overview:
 # ============================================================
 with tab_features:
     st.subheader("Song Features (from upload)")
+
     if uploaded_audio is None:
         st.info("Upload a song to view extracted features.")
     elif audio_feats is None:
         st.warning("Audio uploaded, but extraction failed. Check librosa install or file type.")
     else:
         a, b = st.columns([1, 1])
+
         with a:
             st.markdown(
                 f"""
@@ -935,10 +906,12 @@ with tab_features:
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
     st.subheader("Top Model Drivers (Regression)")
+
     if run and pred_pop is not None:
         reg_pipeline = load_regression_pipeline()
         reg_expected = safe_get_feature_names(reg_pipeline)
         importances = safe_get_feature_importance(reg_pipeline)
+
         if importances is None or reg_expected is None:
             st.caption("Feature importance unavailable for this model.")
         else:
